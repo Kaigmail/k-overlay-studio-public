@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "aspect": "9:16",
+  "cards": [
+    {
+      "id": "demo-chapter",
+      "kind": "chapter-bar",
+      "start": 0,
+      "end": 3.2,
+      "params": {
+        "chapters": "字幕编排 0 | 画布微调 1.6"
+      }
+    }
+  ],
+  "handoff": {
+    "srt": "demo.srt",
+    "srtSha256": "ed99565dad6df4bff283474611742672f7c2be9deeedbf63a9996ec01edce66d",
+    "missing": []
+  }
+}

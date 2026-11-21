@@ -1,0 +1,6 @@
+# Spec Kit 校验文件内容的哈希，Windows 检出时也要保留 LF。
+/.specify/** text eol=lf
+/.agents/skills/speckit-*/SKILL.md text eol=lf
+/.claude/skills/speckit-*/SKILL.md text eol=lf
+/motion-playground/*.command text eol=lf
+/release-demo/demo.srt text eol=lf

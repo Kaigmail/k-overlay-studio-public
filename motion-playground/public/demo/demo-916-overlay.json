@@ -1,0 +1,83 @@
+{
+ "version": 1,
+ "aspect": "9:16",
+ "theme": "dark",
+ "breath": true,
+ "cards": [
+  {
+   "id": "d1",
+   "kind": "chapter-bar",
+   "start": 0,
+   "end": 36,
+   "params": {
+    "chapters": "竖屏示例 0 | 上带主卡 9 | 下带副卡 18 | 金句收尾 27",
+    "accent": "blue"
+   }
+  },
+  {
+   "id": "d2",
+   "kind": "stat-proof",
+   "start": 0.5,
+   "end": 5,
+   "params": {}
+  },
+  {
+   "id": "d3",
+   "kind": "checklist",
+   "start": 5.5,
+   "end": 10,
+   "params": {}
+  },
+  {
+   "id": "d4",
+   "kind": "growth-curve",
+   "start": 5.5,
+   "end": 10,
+   "params": {
+    "position": "right"
+   }
+  },
+  {
+   "id": "d5",
+   "kind": "rank-bars",
+   "start": 10.5,
+   "end": 15,
+   "params": {}
+  },
+  {
+   "id": "d6",
+   "kind": "step-timeline",
+   "start": 10.5,
+   "end": 15,
+   "params": {}
+  },
+  {
+   "id": "d7",
+   "kind": "versus-card",
+   "start": 15.5,
+   "end": 20,
+   "params": {}
+  },
+  {
+   "id": "d8",
+   "kind": "ring-metric",
+   "start": 20.5,
+   "end": 25,
+   "params": {}
+  },
+  {
+   "id": "d9",
+   "kind": "odometer",
+   "start": 25.5,
+   "end": 30,
+   "params": {}
+  },
+  {
+   "id": "d10",
+   "kind": "quote-lockup",
+   "start": 30.5,
+   "end": 35,
+   "params": {}
+  }
+ ]
+}
