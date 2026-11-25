@@ -1,3 +1,4 @@
+import { flushSync } from "react-dom";
 import { inkVars } from "../effects/hud/accent";
 import { BreathContext } from "../effects/breath";
 import {
@@ -6,15 +7,20 @@ import {
   useRef,
   useState,
   type ReactNode,
+  type PointerEvent as ReactPointerEvent,
 } from "react";
 import type { EffectDef } from "../effects/types";
 import { EFFECTS } from "../effects/registry";
-import { STAGE, VERTICAL_PERSON, VERTICAL_STAGE_VARS, VERTICAL_LAYOUT, verticalBand } from "../stage";
+import { STAGE, VERTICAL_PERSON, VERTICAL_STAGE_VARS, VERTICAL_LAYOUT, verticalBand, getAspect } from "../stage";
 import safePortrait from "../assets/safe-area-916.png";
 import safeLandscape from "../assets/safe-area-169.png";
 import { VerticalCardFit } from "./VerticalCardFit";
 import { focusCamGeomAt } from "../effects/hud/camGeom";
-import { outroFade, type OverlayCard } from "../overlay/types";
+import type { OverlayCard, OverlayDoc } from "../overlay/types";
+import { frameOf, restorePlacementParams, type CardLayout } from "../overlay/placement";
+import { OverlayLayout } from "./OverlayLayout";
+import { editPointer } from "./editPointer";
+import { cardFrame } from "../overlay/card-frame";
 import { useEnter } from "../effects/useAnimation";
 import { FxSpeedScope } from "../effects/FxSpeedScope";
 
@@ -32,10 +38,19 @@ interface CanvasProps {
   fxScale: number;
   /** 时间轴模式:当前时间点应显示的卡片(null = 单特效预览模式) */
   overlayCards?: OverlayCard[] | null;
+  overlayDoc?: OverlayDoc | null;
+  onLayout?: (layouts: Map<string, CardLayout>) => void;
+  onBeginEdit?: (key: string) => void;
+  onFinishEdit?: (commit: boolean) => void;
+  onPlaceCard?: (id: string, layout: CardLayout, change: { dx: number; dy: number } | { scale: number; ax: number; ay: number }, wholeGroup?: boolean) => void;
+  onWheelCard?: (id: string, delta: number) => void;
+  moveGroup?: boolean;
   /** 时间轴模式:当前播放头时刻(秒),注入给时间感知卡(章节条/字幕层) */
   now?: number;
   playing?: boolean;
+  seekVersion: number;
   overlayTheme?: "dark" | "light";
+  overlayCam?: string;
   /** 文字可读性光晕(默认关) */
   glow?: boolean;
   /** 呼吸感(doc.breath):卡片落定后微动,见 effects/breath.tsx */
@@ -54,7 +69,7 @@ interface CanvasProps {
   /** 视频元数据加载后上报时长(编辑台时间轴用) */
   onVideoMeta?: (duration: number) => void;
   onNudge?: NudgeFn;
-  onPickCard?: (id: string) => void;
+  onPickCard?: (id: string | null) => void;
   selectedCardId?: string | null;
 }
 
@@ -73,18 +88,36 @@ interface SnapCtx {
 /** 吸附阈值(舞台像素) */
 const SNAP_PX = 12;
 
+function snapAxis(edges: number[], candidates: number[]) {
+  let best: { d: number; adj: number; at: number } | undefined;
+  for (const at of candidates) {
+    for (const edge of edges) {
+      const adj = at - edge;
+      const d = Math.abs(adj);
+      if (d < SNAP_PX && (!best || d < best.d)) best = { d, adj, at };
+    }
+  }
+  return best;
+}
+
+
 function CardShell({
   cardId,
   params,
   stageScale,
   fxScale,
   animSpeed,
-  past,
-  outro,
+  frame,
+  time,
+  start,
+  playing,
+  seekVersion,
   onNudge,
   onPick,
   snapCtx,
   chapterDrag,
+  onCardPointer,
+  onCardWheel,
   children,
 }: {
   cardId: string | null;
@@ -92,14 +125,17 @@ function CardShell({
   stageScale: number;
   fxScale: number;
   animSpeed: number;
-  /** 讲过变浅:时间轴过了该卡 dimAt 后压暗让位 */
-  past?: boolean;
-  /** 退场淡出:临近 end 的整卡不透明度(0~1),1 或缺省 = 不淡 */
-  outro?: number;
+  frame?: ReturnType<typeof cardFrame>;
+  time?: number;
+  start?: number;
+  playing?: boolean;
+  seekVersion?: number;
   onNudge?: NudgeFn;
   onPick?: (id: string) => void;
   snapCtx?: SnapCtx;
   chapterDrag?: boolean;
+  onCardPointer?: (e: ReactPointerEvent<HTMLDivElement>) => void;
+  onCardWheel?: (delta: number) => void;
   children: ReactNode;
 }) {
   const { w: STAGE_W, h: STAGE_H } = STAGE;
@@ -114,19 +150,21 @@ function CardShell({
         display: "contents",
         cursor: onNudge ? "grab" : undefined,
         ["--hud-scale" as string]: scale,
-        ["--fx-outro" as string]: outro,
+        ...frame?.style,
       }}
       /* 逐卡主题:这张卡自己选的亮/暗覆盖全局(未选则继承) */
+      data-card-id={cardId ?? undefined}
       data-chapter-drag={chapterDrag ? "" : undefined}
       data-card-theme={(params.theme as string) || undefined}
       /* 讲过变浅:挂在这个 display:contents 的壳上,靠后代选择器落到卡根元素,
          所以每一张卡都能用,不必逐卡加参数 */
-      data-past={past ? "1" : undefined}
+      data-past={frame?.past ? "1" : undefined}
       /* 退场淡出:同样靠后代选择器落到卡根元素,不必逐卡加参数 */
-      data-outro={outro === undefined ? undefined : "1"}
+      data-outro={frame?.outro === undefined ? undefined : "1"}
       /* 讲过之后的让位方式:both 变浅+缩小(默认)/ fade 只变浅 / shrink 只缩小 */
       data-dim-mode={(params.dimMode as string) || undefined}
       onPointerDown={(e) => {
+        if (onCardPointer) { onCardPointer(e); return; }
         if (!onNudge || e.button !== 0) return;
         if (cardId && onPick) onPick(cardId);
         e.preventDefault();
@@ -182,21 +220,12 @@ function CardShell({
             const hCands = [region?.top ?? (manualPlacement ? 0 : 96),
               region ? (region.top + region.bottom) / 2 : STAGE_H / 2,
               ...others.flatMap((o) => [o.t, (o.t + o.b) / 2, o.b])];
-            const pick = (edges: number[], cands: number[]) => {
-              let best: { d: number; adj: number; at: number } | null = null;
-              for (const ed of edges)
-                for (const c of cands) {
-                  const d = Math.abs(ed - c);
-                  if (d < SNAP_PX && (!best || d < best.d)) best = { d, adj: c - ed, at: c };
-                }
-              return best;
-            };
-            const bx = pick([m0.l + dx, (m0.l + m0.r) / 2 + dx, m0.r + dx], vCands);
+            const bx = snapAxis([m0.l + dx, (m0.l + m0.r) / 2 + dx, m0.r + dx], vCands);
             if (bx) {
               dx += bx.adj;
               g.v.push(bx.at);
             }
-            const by = pick([m0.t + dy, (m0.t + m0.b) / 2 + dy, m0.b + dy], hCands);
+            const by = snapAxis([m0.t + dy, (m0.t + m0.b) / 2 + dy, m0.b + dy], hCands);
             if (by) {
               dy += by.adj;
               g.h.push(by.at);
@@ -231,13 +260,14 @@ function CardShell({
         window.addEventListener("blur", cleanup);
       }}
       onWheel={(e) => {
+        if (onCardWheel) { e.stopPropagation(); onCardWheel(e.deltaY); return; }
         if (!onNudge) return;
         const cur = Number(params.scale) || 1;
         const next = Math.min(2, Math.max(0.4, cur - Math.sign(e.deltaY) * 0.05));
         onNudge(cardId, { scale: Number(next.toFixed(2)) });
       }}
     >
-      <FxSpeedScope speed={speed}>{children}</FxSpeedScope>
+      <FxSpeedScope speed={speed} time={time} start={start} playing={playing} seekVersion={seekVersion}>{children}</FxSpeedScope>
     </div>
   );
 }
@@ -252,9 +282,18 @@ export function Canvas({
   videoUrl,
   fxScale,
   overlayCards,
+  overlayDoc,
+  onLayout,
+  onBeginEdit,
+  onFinishEdit,
+  onPlaceCard,
+  onWheelCard,
+  moveGroup,
   now,
   playing,
+  seekVersion,
   overlayTheme,
+  overlayCam,
   glow,
   breath,
   font,
@@ -272,6 +311,18 @@ export function Canvas({
   const { w: STAGE_W, h: STAGE_H } = STAGE;
   const wrapRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
+  const gestures = useRef<((commit: boolean) => void) | null>(null);
+  useEffect(() => () => gestures.current?.(false), []);
+  const layouts = useRef(new Map<string, CardLayout>());
+  const [selection, setSelection] = useState<CardLayout | undefined>();
+  const updateLayout = (next: Map<string, CardLayout>) => {
+    layouts.current = next;
+    if (!playing) {
+      const current = selectedCardId ? next.get(selectedCardId) : undefined;
+      setSelection((previous) => JSON.stringify(previous) === JSON.stringify(current) ? previous : current);
+    }
+    onLayout?.(next);
+  };
   const videoNodeRef = useRef<HTMLVideoElement | null>(null);
   const [scale, setScale] = useState(0.5);
   // 拖拽对齐辅助线(青色虚线,吸附时出现)
@@ -303,10 +354,22 @@ export function Canvas({
     if (!overlayMode) {
       v.muted = true;
       v.play().catch(() => {});
-    } else {
+    } else if (!playing) {
       v.pause();
     }
   }, [overlayMode, videoUrl]);
+  const alignPrimaryVideo = (video: HTMLVideoElement) => {
+    if (!overlayMode || playing || now === undefined || !Number.isFinite(video.duration)) return;
+    video.pause();
+    const target = Math.min(now, video.duration);
+    if (Math.abs(video.currentTime - target) > 0.0001) video.currentTime = target;
+  };
+
+  useLayoutEffect(() => {
+    const video = videoNodeRef.current;
+    if (video) alignPrimaryVideo(video);
+  }, [overlayMode, playing, now, videoUrl]);
+
   const vertical = STAGE_H > STAGE_W;
   const person = VERTICAL_PERSON;
   const isHud = overlayMode || effect.selfPosition === true;
@@ -322,8 +385,64 @@ export function Canvas({
     : effect.id in PIP_KINDS
       ? { kind: effect.id, params }
       : null;
+  const beginPointer = (
+    event: ReactPointerEvent<HTMLElement>, id: string, corner?: { x: number; y: number },
+  ) => {
+    if (event.button !== 0) return;
+    event.stopPropagation();
+    event.preventDefault();
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+    onPickCard?.(id);
+    const initial = layouts.current.get(id);
+    if (!initial || playing) return;
+    const group = !corner && !!moveGroup && id === selectedCardId && !!initial.group;
+    const movingBox = group ? initial.group!.box : initial.box;
+    const others = [...layouts.current].filter(([otherId, layout]) =>
+      otherId !== id && (!group || layout.group?.name !== initial.group?.name)).map(([, layout]) => layout.box);
+    const horizontal = [0, STAGE_W / 2, STAGE_W, ...others.flatMap(({ x, w }) => [x, x + w / 2, x + w])];
+    const vertical = [0, STAGE_H / 2, STAGE_H, ...others.flatMap(({ y, h }) => [y, y + h / 2, y + h])];
+    const part = corner || group ? null : (event.target as HTMLElement).closest<HTMLElement>("[data-drag-x]");
+    const card = overlayCards?.find((item) => item.id === id);
+    const keyX = part?.dataset.dragX;
+    const keyY = part?.dataset.dragY;
+    const x = event.clientX, y = event.clientY;
+    gestures.current?.(false);
+    onBeginEdit?.(`canvas:${id}`);
+    gestures.current = editPointer(event.pointerId, (pointer) => {
+      const dx = (pointer.clientX - x) / scale;
+      const dy = (pointer.clientY - y) / scale;
+      if (corner) {
+        const sx = corner.x ? -initial.box.w : initial.box.w;
+        const sy = corner.y ? -initial.box.h : initial.box.h;
+        const ratio = 1 + (dx * sx + dy * sy) / (sx * sx + sy * sy);
+        onPlaceCard?.(id, initial, { scale: initial.scale * ratio, ax: corner.x, ay: corner.y });
+      } else if (keyX && keyY && card) {
+        onNudge?.(id, {
+          [keyX]: (Number(card.params[keyX]) || 0) + Math.round(dx / initial.scale),
+          [keyY]: (Number(card.params[keyY]) || 0) + Math.round(dy / initial.scale),
+        });
+      } else {
+        const { x, y, w, h } = movingBox;
+        const hSnap = pointer.altKey ? undefined : snapAxis([x + dx, x + dx + w / 2, x + dx + w], horizontal);
+        const vSnap = pointer.altKey ? undefined : snapAxis([y + dy, y + dy + h / 2, y + dy + h], vertical);
+        setGuides({ v: hSnap ? [hSnap.at] : [], h: vSnap ? [vSnap.at] : [] });
+        onPlaceCard?.(id, initial, { dx: dx + (hSnap?.adj ?? 0), dy: dy + (vSnap?.adj ?? 0) }, group);
+      }
+    }, (commit) => {
+      gestures.current = null;
+      setGuides({ v: [], h: [] });
+      onFinishEdit?.(commit);
+    });
+  };
+
+  const pipPlacement = overlayDoc && pipCard && "id" in pipCard
+    ? frameOf(overlayDoc, pipCard, getAspect())?.current : undefined;
+  const pipParams = pipCard && pipPlacement?.mode === "auto" && "id" in pipCard
+    ? restorePlacementParams(pipCard, pipPlacement) : pipCard?.params;
+  const pipSource = pipParams?.camSrc || overlayCam;
+  const refinedPip = (pipPlacement?.mode === "free" || pipPlacement?.mode === "group") && pipSource === videoUrl;
   const pip = overlayMode ? pipCard != null : pipCard != null && camIn;
-  const pipClass = pipCard ? PIP_KINDS[pipCard.kind](pipCard.params) : "";
+  const pipClass = pipCard ? PIP_KINDS[pipCard.kind](pipParams) : "";
 
   return (
     <BreathContext.Provider value={!!breath}>
@@ -333,6 +452,12 @@ export function Canvas({
       </button>
       <div
         ref={stageRef}
+        onPointerDown={(event) => {
+          if (!overlayMode || event.button !== 0) return;
+          if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+          onPickCard?.(null);
+        }}
+        data-sampled={overlayMode ? "" : undefined}
         className={`stage${isHud ? " is-hud" : ""}${glow ? "" : " no-glow"}${STAGE_H > STAGE_W ? " is-vertical" : ""}`}
         data-theme={theme}
         data-pip={pip && pipCard ? pipCard.kind : undefined}
@@ -364,7 +489,7 @@ export function Canvas({
                     const timed = now !== undefined && c.start !== undefined;
                     const el = timed ? now - (c.start as number) : Infinity;
                     const dur = timed && c.end !== undefined ? c.end - (c.start as number) : Infinity;
-                    const g = focusCamGeomAt(pipCard.params as any, el, dur);
+                    const g = focusCamGeomAt(pipParams as any, el, dur);
                     return {
                       left: g.x,
                       top: g.y,
@@ -373,18 +498,20 @@ export function Canvas({
                       borderRadius: g.r,
                       objectFit: "cover",
                       objectPosition: "50% 45%",
+                      opacity: refinedPip ? 0 : undefined,
                       ...(timed ? { transition: "none" } : {}),
                     } as React.CSSProperties;
                   })()
-                : { transform: `scale(${videoScale ?? 1})` }
+                : { transform: `scale(${videoScale ?? 1})`, ...(overlayMode ? { transition: "none" } : {}) }
             }
             autoPlay={!overlayMode}
             loop={!overlayMode}
             muted={overlayMode ? (videoMuted ?? false) : true}
             playsInline
-            onLoadedMetadata={(e) =>
-              onVideoMeta?.((e.target as HTMLVideoElement).duration || 0)
-            }
+            onLoadedMetadata={(e) => {
+              alignPrimaryVideo(e.currentTarget);
+              onVideoMeta?.(e.currentTarget.duration || 0);
+            }}
             onError={(e) => {
               const el = e.target as HTMLVideoElement;
               const err = el.error;
@@ -434,37 +561,42 @@ export function Canvas({
 
         {/* 时间轴模式:渲染当前时间点的所有卡片(同 seg 的进左列自动顺排容器) */}
         {overlayMode
-          ? (() => {
-              const renderOne = (card: OverlayCard) => {
+          ? overlayDoc && <OverlayLayout doc={overlayDoc} time={now ?? 0} onLayout={updateLayout}
+              render={(card, sample, measurement) => {
                 const def = EFFECTS.find((e) => e.id === card.kind);
                 if (!def) return null;
                 const C = def.Component;
                 const cardSide = (card.params.side as string) ?? "left";
-                const chapterDrag = card.kind === "chapter-bar" && card.id === selectedCardId && !card.seg;
+                const chapterDrag = card.kind === "chapter-bar" && !measurement;
                 // __t/__start/__end:时间感知卡据此高亮当前章、切字幕行
                 const cardParams: Record<string, unknown> = {
                   ...card.params,
-                  __t: now,
+                  __t: sample,
                   __start: card.start,
                   __end: card.end,
-                  __editingPlacement: chapterDrag && !playing,
                 };
-                // 退场淡出:卡片走到 end 就被卸掉,先在这最后一小段把它淡走
-                const outro = now === undefined ? 1 : outroFade(now, card);
+                if (card.kind === "focus-card") {
+                  const source = (card.params.camSrc as string) || overlayCam;
+                  const delayed = !!Number(card.params.camDelay);
+                  const current = frameOf(overlayDoc, card, getAspect())?.current;
+                  const refined = current?.mode === "free" || current?.mode === "group";
+                  cardParams.camSrc = !measurement && source && (source !== videoUrl || delayed || refined) ? source : undefined;
+                }
                 return (
-                  <VerticalCardFit key={card.id} placement={card.params} band={vertical && !card.seg && card.kind !== "focus-card" ? verticalBand(card.kind, card.params) : undefined}>
                     <CardShell
-                      cardId={card.id}
+                      cardId={measurement ? null : card.id}
                       params={card.params}
                       stageScale={scale}
                       fxScale={fxScale}
                       animSpeed={animSpeed ?? 1}
-                      past={(Number(card.params.dimAt) || 0) > 0 && (now ?? 0) >= Number(card.params.dimAt)}
-                      outro={outro < 1 ? outro : undefined}
-                      onNudge={onNudge}
-                      onPick={onPickCard}
+                      frame={cardFrame(sample, card)}
+                      time={sample}
+                      start={card.start}
+                      playing={!measurement && playing}
+                      seekVersion={seekVersion}
+                      onCardPointer={measurement ? undefined : (event) => beginPointer(event, card.id)}
+                      onCardWheel={measurement ? undefined : (delta) => flushSync(() => onWheelCard?.(card.id, delta))}
                       chapterDrag={chapterDrag}
-                      snapCtx={snapCtx}
                     >
                       {def.selfPosition ? (
                         <C params={cardParams} playToken={1} />
@@ -474,36 +606,8 @@ export function Canvas({
                         </div>
                       )}
                     </CardShell>
-                  </VerticalCardFit>
                 );
-              };
-              // 分组:同 seg 的卡进一个竖排容器;容器位置 = 段头(首成员)的 offset,拖段头即拖整段
-              const out: ReactNode[] = [];
-              const seen = new Set<string>();
-              for (const card of overlayCards) {
-                if (!card.seg) {
-                  out.push(renderOne(card));
-                  continue;
-                }
-                if (seen.has(card.seg)) continue;
-                seen.add(card.seg);
-                const members = overlayCards.filter((c) => c.seg === card.seg);
-                const head = members[0];
-                out.push(
-                  <VerticalCardFit key={`seg-${card.seg}`} placement={head.params} band={vertical ? "upper" : undefined}>
-                    <div
-                      className="seg-stack"
-                      style={{
-                        transform: `translate(${Number(head.params.offsetX) || 0}px, ${Number(head.params.offsetY) || 0}px)`,
-                      }}
-                    >
-                      {members.map(renderOne)}
-                    </div>
-                  </VerticalCardFit>,
-                );
-              }
-              return out;
-            })()
+              }} />
           : /* 单特效预览:HUD 族自锚定;极简族落进左右槽 */
             <VerticalCardFit placement={params} band={vertical && effect.id !== "focus-card" ? verticalBand(effect.id, params) : undefined}>
               <CardShell
@@ -524,6 +628,24 @@ export function Canvas({
                 )}
               </CardShell>
             </VerticalCardFit>}
+        {overlayMode && !playing && selectedCardId && selection && (() => {
+          const group = moveGroup ? selection.group : undefined;
+          const { x, y, w, h } = group?.box ?? selection.box;
+          return <div className="card-edit-box" data-edit-card={selectedCardId} data-edit-group={group?.name}
+            style={{ left: x, top: y, width: w, height: h }}>
+            <button type="button" className="card-edit-label"
+              onPointerDown={(event) => beginPointer(event, selectedCardId)}
+              onWheel={(event) => flushSync(() => onWheelCard?.(selectedCardId, event.deltaY))}>
+              {group ? `${group.name} · ${group.visibleCount} 张` : `${Number(selection.scale.toFixed(3))}×`}
+            </button>
+            {!group && [{ x: 1, y: 1 }, { x: 0, y: 1 }, { x: 1, y: 0 }, { x: 0, y: 0 }].map((corner) =>
+              <button key={`${corner.x}${corner.y}`} type="button" className="card-edit-handle"
+                aria-label={`${corner.x ? "左" : "右"}${corner.y ? "上" : "下"}角缩放`}
+                style={{ left: `${(1 - corner.x) * 100}%`, top: `${(1 - corner.y) * 100}%`,
+                  cursor: corner.x === corner.y ? "nwse-resize" : "nesw-resize" }}
+                onPointerDown={(event) => beginPointer(event, selectedCardId, corner)} />)}
+          </div>;
+        })()}
       </div>
     </div>
     </BreathContext.Provider>

@@ -1,4 +1,6 @@
+import { editPointer } from "./editPointer";
 import { useLayoutEffect, useRef, useState } from "react";
+import { isVisibleAt } from "../overlay/export-preset";
 import type { OverlayCard } from "../overlay/types";
 import { kindColor } from "../effects/kindColor";
 import { EFFECTS } from "../effects/registry";
@@ -8,14 +10,24 @@ const effectNames = new Map(EFFECTS.map((effect) => [effect.id, effect.name]));
 interface TimelineBarProps {
   duration: number;
   t: number;
+  sampleTime: number;
   cards: OverlayCard[];
   selectedId: string | null;
+  frameIndex: number;
+  lastFrame: number;
+  fpsLabel: string;
+  onStepFrame: (delta: -1 | 1) => void;
+  loopTarget?: OverlayCard | null;
+  loopUnavailable?: string;
+  onToggleLoop: () => void;
   /** 当前时间点显示中的卡片数 */
   shown: number;
   onSeek: (t: number) => void;
   onSelect: (id: string) => void;
   /** 拖动色块 / 拖边缘后写回卡片时间 */
   onTimes: (id: string, start: number, end: number) => void;
+  onBeginEdit: (key: string) => void;
+  onFinishEdit: (commit: boolean) => void;
 }
 
 function fmt(t: number) {
@@ -53,17 +65,27 @@ function assignLanes(cards: OverlayCard[]): Map<string, number> {
  * 底部视频时间线:当前/总时长/显示数 + 缩放 + 多行卡片轨道 + 播放头。
  * 剪映式擦洗:轨道空白处按下 = 跳到该处,按住左右拖 = 白色竖线跟手。
  * 缩放:「− / +」按钮或 ⌘+滚轮(触控板捏合),拉宽后拖边缘改时间更好下手。
- * 色块整体拖动 = 平移时间;拖左右边缘 = 改出现/消失;点一下 = 选中并跳过去。
+ * 色块整体拖动 = 平移时间;拖左右边缘 = 改出现/消失;点一下 = 留在当前帧选卡。
  */
 export function TimelineBar({
   duration,
   t,
   cards,
   selectedId,
+  sampleTime,
+  frameIndex,
+  lastFrame,
+  fpsLabel,
+  onStepFrame,
+  loopTarget,
+  loopUnavailable,
+  onToggleLoop,
   shown,
   onSeek,
   onSelect,
   onTimes,
+  onBeginEdit,
+  onFinishEdit,
 }: TimelineBarProps) {
   const dur = Math.max(duration, 0.001);
   /** 滚动容器(视口) */
@@ -183,6 +205,7 @@ export function TimelineBar({
     const e0 = card.end;
     const x0 = e.clientX;
     let moved = false;
+    onBeginEdit(`timeline:${card.id}`);
 
     // 磁吸对齐:其他卡的起止 + 播放头 + 0 点;10px 内自动吸附(按 Alt 拖 = 关磁吸)
     const targets: number[] = [0, t];
@@ -224,18 +247,14 @@ export function TimelineBar({
         onTimes(card.id, s0, round2(Math.max(en, s0 + MIN_DUR)));
       }
     };
-    const onUp = () => {
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
-      // 没拖动 = 单击:跳到这张卡开头
-      if (!moved) onSeek(card.start + 0.01);
-    };
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
+    editPointer(e.pointerId, onMove, onFinishEdit);
   };
 
   return (
-    <section className="tlb" aria-label="时间轴">
+    <section className="tlb" aria-label="时间轴" onPointerDownCapture={() => {
+      const active = document.activeElement;
+      if (active instanceof HTMLElement && active.hasAttribute("data-field-edit")) active.blur();
+    }}>
       <div
         className={`tlb-resize ${resizing ? "is-drag" : ""}`}
         onPointerDown={startResize}
@@ -267,6 +286,22 @@ export function TimelineBar({
             +
           </button>
         </span>
+        <span className="tlb-zoom" aria-label="成品逐帧">
+          <button type="button" className="tlb-zoom-btn" aria-label="上一帧" title="上一帧" disabled={frameIndex <= 0} onClick={() => onStepFrame(-1)}>‹</button>
+          <span className="tlb-zoom-val" data-frame-index={frameIndex}>第 {frameIndex + 1} 帧 · {fpsLabel} fps</span>
+          <button type="button" className="tlb-zoom-btn" aria-label="下一帧" title="下一帧" disabled={frameIndex >= lastFrame} onClick={() => onStepFrame(1)}>›</button>
+        </span>
+        <span className="tlb-loop">
+          <button type="button" className="tlb-zoom-btn tlb-loop-btn" aria-pressed={!!loopTarget}
+            disabled={!loopTarget && !!loopUnavailable} title={loopTarget ? undefined : loopUnavailable}
+            onClick={onToggleLoop}>
+            {loopTarget ? "退出循环" : "循环所选时段"}
+          </button>
+          {loopTarget && <span role="status" data-loop-card={loopTarget.id}>
+            {effectNames.get(loopTarget.kind) ?? loopTarget.kind} · {fmt(loopTarget.start)}–{fmt(loopTarget.end)}
+          </span>}
+          {!loopTarget && selectedId && loopUnavailable && <span>{loopUnavailable}</span>}
+        </span>
         <span className="tlb-keys">
           空格 播放 · ← → ±0.5s · ↑ ↓ 换卡 · ⌘Z 撤销 · Delete 删卡 · 点/拖轨道 跳转
         </span>
@@ -285,7 +320,7 @@ export function TimelineBar({
               <div
                 key={c.id}
                 className={`tlb-card ${c.id === selectedId ? "is-sel" : ""} ${
-                  t >= c.start && t < c.end ? "is-live" : ""
+                  isVisibleAt(sampleTime, c) ? "is-live" : ""
                 }`}
                 style={{
                   left: `${(c.start / dur) * 100}%`,
@@ -294,6 +329,7 @@ export function TimelineBar({
                   height: laneH - 5,
                   background: kindColor(c.kind),
                 }}
+                data-card-id={c.id}
                 title={`${c.kind} ${fmt(c.start)}–${fmt(c.end)}(拖=平移,拖边缘=改起止,Delete=删除)`}
                 onPointerDown={(e) => startDrag(e, c)}
               >

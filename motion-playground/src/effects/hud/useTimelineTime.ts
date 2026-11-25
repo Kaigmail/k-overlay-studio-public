@@ -13,10 +13,8 @@ export function useTimelineTime(params: { __t?: number }, playToken: number): nu
   useEffect(() => {
     if (hasInjected) return;
     let raf = 0;
-    // 起点/每帧都读 performance.now():导出的虚拟时间下 rAF 时间戳的钟不可靠
     let t0: number | null = null;
-    const tick = () => {
-      const now = performance.now();
+    const tick = (now: number) => {
       if (t0 === null) t0 = now;
       setSelfT((now - t0) / 1000);
       raf = requestAnimationFrame(tick);

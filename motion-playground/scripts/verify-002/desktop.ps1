@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory)][int]$HostProcessId,
-    [Parameter(Mandatory)][ValidateSet('inspect','minimize','select','cancel','close','confirm','wait','stay')][string]$Action,
+    [Parameter(Mandatory)][ValidateSet('inspect','minimize','select','cancel','close','confirm','wait','stay','ime-focus','ime-type','ime-confirm','ime-finish','ime-toggle')][string]$Action,
     [string]$Folder,
     [string]$Picture,
     [string]$ExpectedTitle
@@ -28,6 +28,37 @@ public static class DesktopVerify {
     [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr window, int command);
     [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr window);
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] static extern void keybd_event(byte key, byte scan, uint flags, UIntPtr extra);
+    [DllImport("user32.dll")] static extern uint MapVirtualKey(uint code, uint mapType);
+    [DllImport("user32.dll")] static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll")] static extern bool GetCursorPos(out Point point);
+    [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(Point point);
+    [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr window, uint flags);
+    [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr window, IntPtr order, int x, int y, int width, int height, uint flags);
+    [DllImport("user32.dll")] static extern void mouse_event(uint flags, uint x, uint y, uint data, UIntPtr extra);
+    [StructLayout(LayoutKind.Sequential)]
+    struct Point { public int X, Y; }
+    public static bool SetTopmost(IntPtr window, bool topmost) {
+        return SetWindowPos(window, new IntPtr(topmost ? -1 : -2), 0, 0, 0, 0, 0x13);
+    }
+    public static void Click(IntPtr window, int x, int y) {
+        if (GetAncestor(WindowFromPoint(new Point { X = x, Y = y }), 2) != window)
+            throw new InvalidOperationException("Native editor field is covered by another window.");
+        Point before;
+        GetCursorPos(out before);
+        SetCursorPos(x, y);
+        mouse_event(2, 0, 0, 0, UIntPtr.Zero);
+        mouse_event(4, 0, 0, 0, UIntPtr.Zero);
+        System.Threading.Thread.Sleep(120);
+        SetCursorPos(before.X, before.Y);
+    }
+    public static void Press(byte key) {
+        byte scan = (byte)MapVirtualKey(key, 0);
+        keybd_event(key, scan, 0, UIntPtr.Zero);
+        System.Threading.Thread.Sleep(40);
+        keybd_event(key, scan, 2, UIntPtr.Zero);
+        System.Threading.Thread.Sleep(80);
+    }
     [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
     [StructLayout(LayoutKind.Sequential)]
     struct Rect { public int Left, Top, Right, Bottom; }
@@ -119,6 +150,37 @@ function Invoke-Button([IntPtr]$parent, [int]$id) {
     $button = [DesktopVerify]::Child($parent, $id, 'Button')
     if ($button -eq [IntPtr]::Zero) { throw "Native dialog button $id unavailable." }
     if (![DesktopVerify]::PostMessage($button, 0x00F5, [IntPtr]::Zero, [IntPtr]::Zero)) { throw 'Native dialog click failed.' }
+}
+
+if ($Action -in 'ime-focus','ime-type','ime-confirm','ime-finish','ime-toggle') {
+    $window = Find-Window $false
+    $handle = [IntPtr]$window.Current.NativeWindowHandle
+    if ($Action -eq 'ime-focus') {
+        $name = New-Object Windows.Automation.PropertyCondition ([Windows.Automation.AutomationElement]::NameProperty), $ExpectedTitle
+        $editType = New-Object Windows.Automation.PropertyCondition ([Windows.Automation.AutomationElement]::ControlTypeProperty), ([Windows.Automation.ControlType]::Edit)
+        $field = $window.FindFirst($descendants, (New-Object Windows.Automation.AndCondition($name, $editType)))
+        if (!$field -or $field.Current.IsOffscreen) { throw 'Native editor field is unavailable.' }
+        $raise = [DesktopVerify]::GetForegroundWindow() -ne $handle
+        if ($raise -and ![DesktopVerify]::SetTopmost($handle, $true)) { throw 'Could not raise the test window.' }
+        try {
+            $point = $field.GetClickablePoint()
+            [DesktopVerify]::Click($handle, [int]$point.X, [int]$point.Y)
+        } finally {
+            if ($raise) { $null = [DesktopVerify]::SetTopmost($handle, $false) }
+        }
+    }
+    $keys = switch ($Action) {
+        'ime-type' { 0x48, 0x55, 0x4F, 0x43, 0x48, 0x45 }
+        'ime-confirm' { 0x31 }
+        'ime-finish' { 0x0D }
+        'ime-toggle' { 0x10 }
+    }
+    foreach ($key in $keys) {
+        if ([DesktopVerify]::GetForegroundWindow() -ne $handle) { throw 'Native input needs the tested window in the foreground.' }
+        [DesktopVerify]::Press([byte]$key)
+    }
+    [pscustomobject]@{ action = $Action; handle = $handle.ToInt64() } | ConvertTo-Json -Compress
+    exit
 }
 
 if ($Action -in 'inspect','minimize','close') {

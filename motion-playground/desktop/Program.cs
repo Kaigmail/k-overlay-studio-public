@@ -292,7 +292,7 @@ sealed class DesktopWindow : Form
     {
         args.Handled = true;
         if (!args.IsUserInitiated || !TrustedPage(view.CoreWebView2.Source)) return;
-        if (args.Uri != "https://www.overlaystudio.cn/" && args.Uri != Home + "LICENSE.txt") return;
+        if (args.Uri != Home + "LICENSE.txt") return;
         try { Process.Start(new ProcessStartInfo(args.Uri) { UseShellExecute = true }); }
         catch (System.ComponentModel.Win32Exception error)
         {
@@ -536,7 +536,7 @@ sealed class DesktopWindow : Form
         foreach (string marker in Directory.GetFiles(pending))
         {
             string key = Path.GetFileName(marker);
-            if (!System.Text.RegularExpressions.Regex.IsMatch(key, @"^[\w.-]+-\d+_\d+fps-\d+-\d+s$")) continue;
+            if (!System.Text.RegularExpressions.Regex.IsMatch(key, @"^(source-pts-v1-[a-f0-9]{20}-\d+ms|[\w.-]+-\d+_\d+fps-\d+-\d+s)$")) continue;
             var cache = new DirectoryInfo(Path.Combine(root, "public", "_fxframes", key));
             if (cache.Exists && (cache.Attributes & FileAttributes.ReparsePoint) == 0 &&
                 !File.Exists(Path.Combine(cache.FullName, "manifest.json")))

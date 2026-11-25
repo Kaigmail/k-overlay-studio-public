@@ -1,5 +1,3 @@
-import { VERSION_LABEL, VERSION_TITLE } from "../version";
-import { PROMO_URL } from "../promo";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ACCENT_OPTIONS } from "../effects/hud/accent";
@@ -66,6 +64,10 @@ interface TopBarProps {
   onConfirmAspect: () => void;
   onCancelAspect: () => void;
   onPreparation: () => void;
+  onUndo: () => void;
+  onRedo: () => void;
+  canUndo: boolean;
+  canRedo: boolean;
   onStartOver: () => void;
   onExportJson: () => void;
   saving: boolean;
@@ -218,6 +220,10 @@ export function TopBar({
   onConfirmAspect,
   onCancelAspect,
   onPreparation,
+  onUndo,
+  onRedo,
+  canUndo,
+  canRedo,
   onStartOver,
   onExportJson,
   saving,
@@ -282,6 +288,8 @@ export function TopBar({
         <h1 title={productionName}>{productionName || "编辑台"}</h1>
       </div>
       <div className="production-editactions">
+        <button onClick={onUndo} disabled={!canUndo || exporting} title="Ctrl / Cmd + Z">撤销</button>
+        <button onClick={onRedo} disabled={!canRedo || exporting} title="Ctrl / Cmd + Shift + Z">重做</button>
         <button onClick={onStartOver} disabled={exporting || saving || videoBusy}>重新开始</button>
         <select aria-label="画幅" value={aspect} disabled={exporting}
           onChange={(event) => onAspect(event.target.value as "9:16" | "16:9")}>
@@ -331,10 +339,7 @@ export function TopBar({
       </div>
     </dialog>
     <div className="topbar">
-      <div className="tb-brand">
-        K-Overlay-Studio
-        <span className="tb-ver" title={VERSION_TITLE}>{VERSION_LABEL}</span>
-      </div>
+      <div className="tb-brand">K-Overlay-Studio</div>
 
       {/* 模式切换:一眼看清自己在哪 */}
       <button className={`tb-tab ${tab === "edit" ? "is-on" : ""}`} onClick={() => onTab("edit")}>
@@ -346,21 +351,6 @@ export function TopBar({
       >
         效果库
       </button>
-      {/* 版本指南入口。放在两个模式切换的紧右边 —— 眼睛本来就扫这一片,
-          又不混进右边那排干活的按钮(那儿每次导出都会看到,容易烦)。
-          地址为空时整个不渲染。 */}
-      {PROMO_URL ? (
-        <a
-          className="tb-pro"
-          href={PROMO_URL}
-          target="_blank"
-          rel="noreferrer"
-          title="打开原作者一页枝鸥的版本指南"
-        >
-          上游官网 ↗
-        </a>
-      ) : null}
-
       {/* 读数模块 */}
       <div className="tb-meter" ref={meterRef}>
         {tab === "edit" ? (

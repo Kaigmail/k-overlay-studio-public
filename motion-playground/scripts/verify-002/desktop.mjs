@@ -42,7 +42,7 @@ async function fetchStatus() {
   return fetch(url + "/api/export-status", { signal: AbortSignal.timeout(4000) }).then((response) => response.json());
 }
 
-export async function verifyDesktop(context) {
+export async function verifyDesktop(context, inspectEditor) {
   if (process.platform !== "win32") {
     context.skip("windows-desktop", "真实 EXE 验收需要 Windows 桌面会话。");
     return;
@@ -62,7 +62,7 @@ export async function verifyDesktop(context) {
   const saved = join(profile, "last-export-directory.txt");
   const selected = join(context.evidenceDir, "中文成品目录");
   const displaced = join(context.evidenceDir, "中文成品目录-已移走");
-  await mkdir(selected);
+  if (!inspectEditor) await mkdir(selected);
   const processes = [];
   let browser, running, page, identity;
   const dialogs = [];
@@ -113,6 +113,7 @@ export async function verifyDesktop(context) {
     const target = await browser.waitForTarget((item) => item.type() === "page" && item.url() === url + "/", { timeout: 20_000 });
     page = await target.page();
     page.setDefaultTimeout(18_000);
+    await page.waitForFunction((origin) => location.origin === origin && !!document.querySelector(".production-heading"), {}, url);
     // Keep the native dialog checks focused on the export and folder flows.
     await page.evaluate(() => localStorage.setItem("overlayStudioLearnTipCount", "3"));
     page.on("dialog", async (event) => {
@@ -170,62 +171,68 @@ export async function verifyDesktop(context) {
   };
 
   try {
-    const portCase = await context.check("desktop-foreign-port", async () => {
-      const external = await reserve(5177);
-      const blocked = start(0);
-      try {
-        const info = await until(async () => {
-          const current = await ui(blocked, "inspect");
-          return current.texts.some((line) => line.includes("5177 已被其他程序占用")) && current;
-        }, "窗口没有说明 5177 端口被占用。", 5000);
-        await ui(blocked, "close");
-        await gone(blocked);
-        assert.equal(external.listening, true);
-        const response = await fetch("http://127.0.0.1:5177/", { signal: AbortSignal.timeout(3000) });
-        assert.equal(await response.text(), "OK");
-        return info;
-      } finally {
-        external.closeAllConnections();
-        await new Promise((resolve) => external.close(resolve));
-      }
-    });
-    if (!portCase) return;
-
-    await context.check("desktop-missing-node", async () => {
-      const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toLowerCase() !== "path"));
-      const missing = start(0, { ...env, Path: join(process.env.SystemRoot, "System32") });
-      try {
-        const info = await until(async () => {
-          const state = await ui(missing, "inspect");
-          return state.texts.some((line) => !line.includes("正在启动")) && state;
-        }, "窗口没有显示启动结果。", 10_000);
-        assert.ok(info.texts.some((line) => line.includes("找不到 Node.js")), info.texts.join("；"));
-        return info;
-      } finally {
-        if (isAlive(missing.pid)) await ui(missing, "close");
-        await gone(missing);
-      }
-    });
-
-    await context.check("desktop-debug-off-by-default", async () => {
-      const standard = start(0);
-      await until(() => fetchStatus().catch(() => false), "常规桌面服务未启动。", 45_000);
-      const children = await until(async () => {
-        const current = await descendants(standard.pid);
-        return current.some(({ name }) => name.toLowerCase() === "msedgewebview2.exe") && current;
-      }, "常规桌面 WebView2 未启动。");
-      for (const { pid, name } of children) {
-        assert.ok(!["msedge.exe", "chrome.exe", "firefox.exe"].includes(name.toLowerCase()), "桌面启动了外部浏览器。");
-        if (name.toLowerCase() === "msedgewebview2.exe") {
-          const args = await ps("-Command", `(Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}').CommandLine`);
-          assert.doesNotMatch(args, /--remote-debugging-(?:port|pipe)/i);
+    if (inspectEditor) {
+      const available = await reserve(5177);
+      await new Promise((resolve) => available.close(resolve));
+    } else {
+      const portCase = await context.check("desktop-foreign-port", async () => {
+        const external = await reserve(5177);
+        const blocked = start(0);
+        try {
+          const info = await until(async () => {
+            const current = await ui(blocked, "inspect");
+            return current.texts.some((line) => line.includes("5177 已被其他程序占用")) && current;
+          }, "窗口没有说明 5177 端口被占用。", 5000);
+          await ui(blocked, "close");
+          await gone(blocked);
+          assert.equal(external.listening, true);
+          const response = await fetch("http://127.0.0.1:5177/", { signal: AbortSignal.timeout(3000) });
+          assert.equal(await response.text(), "OK");
+          return info;
+        } finally {
+          external.closeAllConnections();
+          await new Promise((resolve) => external.close(resolve));
         }
-      }
-      await ui(standard, "close");
-      await gone(standard);
-      await until(() => children.every(({ pid }) => !isAlive(pid)), "常规退出后仍有自有进程。", 25_000);
-      return { processes: children, testDebuggingEnabled: false };
-    });
+      });
+      if (!portCase) return;
+
+      await context.check("desktop-missing-node", async () => {
+        const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.toLowerCase() !== "path"));
+        const missing = start(0, { ...env, Path: join(process.env.SystemRoot, "System32") });
+        try {
+          const info = await until(async () => {
+            const state = await ui(missing, "inspect");
+            return state.texts.some((line) => !line.includes("正在启动")) && state;
+          }, "窗口没有显示启动结果。", 10_000);
+          assert.ok(info.texts.some((line) => line.includes("找不到 Node.js")), info.texts.join("；"));
+          return info;
+        } finally {
+          if (isAlive(missing.pid)) await ui(missing, "close");
+          await gone(missing);
+        }
+      });
+
+      await context.check("desktop-debug-off-by-default", async () => {
+        const standard = start(0);
+        await until(() => fetchStatus().catch(() => false), "常规桌面服务未启动。", 45_000);
+        const children = await until(async () => {
+          const current = await descendants(standard.pid);
+          return current.some(({ name }) => name.toLowerCase() === "msedgewebview2.exe") && current;
+        }, "常规桌面 WebView2 未启动。");
+        for (const { pid, name } of children) {
+          assert.ok(!["msedge.exe", "chrome.exe", "firefox.exe"].includes(name.toLowerCase()), "桌面启动了外部浏览器。");
+          if (name.toLowerCase() === "msedgewebview2.exe") {
+            const args = await ps("-Command", `(Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}').CommandLine`);
+            assert.doesNotMatch(args, /--remote-debugging-(?:port|pipe)/i);
+          }
+        }
+        await ui(standard, "close");
+        await gone(standard);
+        await until(() => children.every(({ pid }) => !isAlive(pid)), "常规退出后仍有自有进程。", 25_000);
+        return { processes: children, testDebuggingEnabled: false };
+      });
+
+    }
 
     running = start();
     const started = await context.check("desktop-exe-launch", async () => {
@@ -243,6 +250,11 @@ export async function verifyDesktop(context) {
       return { ...info, ...before, identity, binarySha256: builtHash, workingDirectory: context.evidenceDir };
     });
     if (!started) return;
+    if (inspectEditor) {
+      await context.check("desktop-editor-fields", () => inspectEditor(page, (action, ...args) => ui(running, action, ...args)));
+      await context.check("desktop-shutdown", () => close());
+      return;
+    }
     await context.check("desktop-single-instance", async () => {
       await ui(running, "minimize");
       const minimized = await until(async () => {

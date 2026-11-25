@@ -1,3 +1,4 @@
+import { formatNumericText, splitCurvePoint, type NumericText } from "../../overlay/numeric-text";
 import { useId } from "react";
 import type { CSSProperties } from "react";
 import type { EffectDef, EffectProps } from "../types";
@@ -127,28 +128,18 @@ function gcTitleLines(s: string, maxW: number, fs: number): string[] {
   return gcGreedy(t, fs, maxW, 0.02);
 }
 
-type GcPt = { label: string; raw: string; v: number; dec: number; comma: boolean };
-/** 「标签 数值」:数值可带千分位、小数、负号 */
+type GcPt = { label: string; raw: string; v: number; dec: number; sign: NumericText["sign"] };
+
 function gcParsePoints(raw: string): GcPt[] {
-  return raw
-    .split("|")
-    .map((x) => x.trim())
-    .filter(Boolean)
-    .map((seg) => {
-      const m = seg.match(/^(.*?)\s*(-?\d[\d,]*(?:\.\d+)?)$/);
-      if (!m) return { label: seg, raw: "0", v: 0, dec: 0, comma: false };
-      const num = m[2];
-      return {
-        label: m[1].trim(),
-        raw: num,
-        v: parseFloat(num.replace(/,/g, "")) || 0,
-        dec: num.includes(".") ? num.split(".")[1].length : 0,
-        comma: num.includes(","),
-      };
-    });
+  return raw.split("|").filter((row) => row.trim()).map((row) => {
+    const { label, numeric } = splitCurvePoint(row);
+    const v = numeric?.value ?? 0;
+    const dec = numeric?.decimals ?? 0;
+    const sign = numeric?.sign ?? "";
+    return { label, raw: numeric?.text ?? "0", v, dec, sign };
+  });
 }
-const gcFmt = (v: number, p: GcPt) =>
-  p.comma ? v.toLocaleString("en-US", { minimumFractionDigits: p.dec, maximumFractionDigits: p.dec }) : v.toFixed(p.dec);
+const gcFmt = (v: number, p: GcPt) => formatNumericText(v, p.dec, p.sign);
 /** 首点 → 重点:涨了显示 ×倍数,跌了显示 −百分比;首点 ≤0、重点 ≤0 或几乎没变就不显示 */
 function gcDelta(first: number, last: number): string {
   if (!(first > 0) || !(last > 0)) return "";
@@ -234,12 +225,12 @@ function GrowthCurve({ params, playToken }: EffectProps<GrowthCurveParams>) {
 
   // ── 数据 ──
   const pts0 = gcParsePoints(points);
-  const pts = pts0.length ? pts0 : [{ label: "", raw: "0", v: 0, dec: 0, comma: false }];
+  const pts: GcPt[] = pts0.length ? pts0 : [{ label: "", raw: "0", v: 0, dec: 0, sign: "" }];
   const n = pts.length;
   const fi = params.focus === "max" ? pts.reduce((b, p, i) => (p.v > pts[b].v ? i : b), 0) : n - 1;
   const fp = pts[fi];
   const deltaTxt = params.delta === false || fi === 0 ? "" : gcDelta(pts[0].v, fp.v);
-  const finalTxt = gcFmt(fp.v, fp);
+  const finalTxt = fp.raw;
 
   // ── 版式 ──
   const wide0 = low;
@@ -426,7 +417,7 @@ function GrowthCurve({ params, playToken }: EffectProps<GrowthCurveParams>) {
 
   // 大字滚动
   const cp = gcProg(t, drawB, countB);
-  const shownTxt = gcFmt(fp.v * (1 - Math.pow(1 - cp, 3)), fp);
+  const shownTxt = cp >= 1 ? fp.raw : gcFmt(fp.v * (1 - Math.pow(1 - cp, 3)), fp);
   const lin = gcOCubic(gcProg(t, drawB - 0.15, drawB + 0.3));
   const punch = t >= countB ? Math.exp(-Math.max(0, t - countB) * 7) : 0;
   const peakS = (0.9 + 0.1 * lin) * (1 + 0.06 * punch);

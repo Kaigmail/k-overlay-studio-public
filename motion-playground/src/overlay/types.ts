@@ -1,5 +1,6 @@
 import { EFFECTS } from "../effects/registry";
 import type { Aspect } from "../stage";
+import { parseRefinement, type OverlayRefinement } from "./refinement";
 
 /** 时间轴上的一张动效卡 */
 export interface OverlayCard {
@@ -7,7 +8,7 @@ export interface OverlayCard {
   kind: string; // 卡片类型 = 特效 id(registry 里的一种)
   start: number; // 出现时间(秒,来自 SRT)
   end: number; // 消失时间(秒)
-  /** 段落分组:同 seg 的卡进左列自动顺排容器(段头卡是整段拖拽把手) */
+  /** 段落分组:同 seg 的卡默认按组顺排 */
   seg?: string;
   /** 检查器忽略标记(用户主动决定):true = 整卡免检;数组 = 忽略指定规则名 */
   lintOff?: boolean | string[];
@@ -55,6 +56,14 @@ export interface OverlayDoc {
    *  空 = 用主题默认值。这是「盖一层」,不改各卡参数,随时清空即恢复。 */
   inkColor?: string;
   cards: OverlayCard[];
+  refinement?: OverlayRefinement;
+}
+
+/** 卡片增删时一起更新精修引用，确保下一次草稿和交付直接写出有效顺序。 */
+export function withOverlayCards(doc: OverlayDoc, cards: OverlayCard[]): OverlayDoc {
+  if (!doc.refinement) return { ...doc, cards };
+  const { refinement } = parseRefinement(doc.refinement, cards, cards.map(({ id }) => id));
+  return { ...doc, cards, refinement };
 }
 
 /**
@@ -70,6 +79,7 @@ export interface OverlayDoc {
 export function parseOverlay(raw: unknown): {
   doc?: OverlayDoc;
   error?: string;
+  warnings?: string[];
   /** 被跳过的卡:kind = 认不出的类型,n = 这份编排里有几张 */
   dropped?: { kind: string; n: number }[];
 } {
@@ -87,7 +97,7 @@ export function parseOverlay(raw: unknown): {
         dropCount.set(k, (dropCount.get(k) ?? 0) + 1);
         continue;
       }
-      if (typeof c.start !== "number" || typeof c.end !== "number" || c.end <= c.start)
+      if (!Number.isFinite(c.start) || !Number.isFinite(c.end) || c.end <= c.start)
         return { error: `第 ${i + 1} 张卡片时间非法: start=${c.start} end=${c.end}` };
       const id = String(c.id ?? `card-${i + 1}`);
       if (ids.has(id)) return { error: `卡片 id 重复: "${id}"` };
@@ -112,10 +122,13 @@ export function parseOverlay(raw: unknown): {
           .slice(0, 3)
           .join("、")}${dropCount.size > 3 ? " 等" : ""})`,
       };
+    const { refinement, warnings, error } = parseRefinement(o.refinement, cards, [...ids]);
+    if (error) return { error };
     const dropped = [...dropCount].map(([kind, n]) => ({ kind, n }));
     const theme = o.theme === "light" ? "light" : o.theme === "dark" ? "dark" : undefined;
     return {
       dropped: dropped.length ? dropped : undefined,
+      ...(warnings && { warnings }),
       doc: {
         version: 1,
         aspect: o.aspect === "9:16" ? "9:16" : undefined,
@@ -126,6 +139,7 @@ export function parseOverlay(raw: unknown): {
         font: typeof o.font === "string" && o.font ? o.font : undefined,
         inkColor: typeof o.inkColor === "string" && /^#[0-9a-fA-F]{3,8}$/.test(o.inkColor) ? o.inkColor : undefined,
         cards,
+        ...(refinement && { refinement }),
       },
     };
   } catch (e) {

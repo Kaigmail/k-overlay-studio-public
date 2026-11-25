@@ -298,9 +298,15 @@ export function lintOverlayText(
   config?: Partial<LintConfig> | null,
   opts?: { duration?: number },
 ): { doc?: OverlayDoc; issues: LintIssue[] } {
-  const { doc, error } = parseOverlay(text);
+  const { doc, error, warnings } = parseOverlay(text);
   if (error || !doc) {
     return { issues: [{ level: "error", rule: "parse", message: error ?? "解析失败" }] };
   }
-  return { doc, issues: lintOverlay(doc, config, opts) };
+  return {
+    doc,
+    issues: [
+      ...(warnings ?? []).map((message) => ({ level: "warn" as const, rule: "refinement", message })),
+      ...lintOverlay(doc, config, opts),
+    ],
+  };
 }

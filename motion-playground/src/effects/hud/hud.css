@@ -119,16 +119,6 @@
 .stage.is-hud .person-body::before { background: var(--hud-person); border-color: transparent; }
 .stage.is-hud .person-tag { color: var(--hud-faint); }
 
-/* ---- 通透玻璃 ---- */
-.hud-glass {
-  background: var(--hud-glass);
-  border: 1px solid var(--hud-glass-brd);
-  backdrop-filter: blur(28px) saturate(1.3);
-  -webkit-backdrop-filter: blur(28px) saturate(1.3);
-  border-radius: 20px;
-  box-shadow: var(--hud-card-sh);
-}
-
 /* ---- 落位锚点(避开中间人物安全区) ---- */
 /* 锚点做粗定位,--hud-ox/oy 做参数面板里的精细微调,两者叠加 */
 .hud-anchor {
@@ -863,18 +853,22 @@
 .gcv-lb { font-size: 21px; font-weight: 600; fill: var(--hud-muted); }
 .gcv-cap { font-size: 21px; color: var(--hud-muted); text-align: right; }
 
+/* 时间轴帧使用组件给出的进度；效果库保留自走过渡。 */
+.stage[data-sampled] :is(.hud, .hud *, .slot, .slot *, .hud-anchor) {
+  transition: none !important;
+}
+
 /* ---- 讲过变浅:dimAt 秒后整卡压暗让位,在场但不抢戏 ----
    用 filter 而不是 opacity:不跟卡片自己的进场透明度动画打架 */
 [data-past="1"]:not([data-dim-mode="shrink"]) .hud,
 [data-past="1"]:not([data-dim-mode="shrink"]) .slot > * {
-  filter: opacity(0.45) saturate(0.7);
-  transition: filter 0.9s ease;
+  filter: opacity(var(--fx-dim-opacity, 0.45)) saturate(var(--fx-dim-saturation, 0.7));
 }
 
 /* 退场淡出:卡片在 end 前的最后一小段整卡溶解。
    可见区间左闭右开,走到 end 直接卸载 —— 不淡的话时间轴末尾好几张卡会在同一帧
    一起消失,成片看着就是闪一下。不透明度由 outroFade() 逐帧算好写进 --fx-outro,
-   刻意不加 transition:导出走虚拟时间,过渡不可信。 */
+   预览和导出都直接取当前节目帧的透明度。 */
 [data-outro] .hud,
 [data-outro] .slot > * {
   opacity: var(--fx-outro, 1);
@@ -891,8 +885,7 @@
   from { filter: brightness(1); }
   to { filter: brightness(1.12); }
 }
-.stage.no-glow .spf-num,
-.stage.no-glow .gcv-peak {
+.stage.no-glow :is(.spf-num, .gcv-peak):not([data-past="1"] *) {
   animation-name: hud-focus-breathe-noglow;
 }
 /* 数字焦点:实证卡/增长曲线的峰值大数字,计数落定后轻微呼吸 */
@@ -901,8 +894,7 @@
   animation: hud-focus-breathe 2.8s ease-in-out 1.4s infinite alternate;
 }
 /* 整卡进入"讲过变浅"后,内部焦点也停止呼吸 */
-[data-past="1"] .spf-num,
-[data-past="1"] .gcv-peak {
+[data-past="1"] :is(.spf-num, .gcv-peak) {
   animation: none;
 }
 
@@ -930,14 +922,13 @@
   /* 缩放用 zoom(参与布局,不会叠到下一张);成员自己的 offset 变成组内微调 */
   transform: translate(var(--hud-ox, 0px), var(--hud-oy, 0px));
   zoom: var(--hud-scale, 1);
-  transition: zoom 0.9s ease;
 }
 /* 段头(首成员)是整段拖拽把手:它的 offset 已由容器消费,不再自己位移 */
 .seg-stack > :first-child .hud-anchor { transform: none; }
 /* 讲过让位缩小:zoom 参与布局,下方内容自动上移,不再被挤出屏幕
    dimMode 可组合:both(默认)变浅+缩小 / fade 只变浅 / shrink 只缩小 */
 .seg-stack [data-past="1"]:not([data-dim-mode="fade"]) .hud-anchor {
-  zoom: calc(var(--hud-scale, 1) * 0.6);
+  zoom: calc(var(--hud-scale, 1) * var(--fx-dim-scale, 0.6));
 }
 /* 卡片层级:锚点卡/段容器统一 z2,比根元素没挂 .hud-anchor 的自锚定卡(层级 auto)高一层 */
 .hud-anchor, .seg-stack { z-index: 2; }
@@ -969,34 +960,6 @@
 }
 .hud.is-in .pbd-chip { opacity: 1; transform: none; }
 
-/* ============================================================
-   通用文字卡玻璃底:黑/白/无 + 透明度(--hud-glass-alpha)
-   加在文字卡根节点上;none 时不加 class,布局与旧行为一致
-   ============================================================ */
-.hud-glass { border-radius: 18px; padding: 26px 36px; }
-.hud-glass--dark {
-  background: rgba(18, 16, 26, var(--hud-glass-alpha, 0.6));
-  border: 1px solid rgba(255, 255, 255, 0.13);
-  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.32);
-  backdrop-filter: blur(14px) saturate(1.1);
-  -webkit-backdrop-filter: blur(14px) saturate(1.1);
-}
-.export-mode .hud-glass--dark {
-  background: rgba(14, 13, 20, var(--hud-glass-alpha, 0.82));
-  backdrop-filter: none; -webkit-backdrop-filter: none;
-}
-.hud-glass--light {
-  background: rgba(255, 255, 255, var(--hud-glass-alpha, 0.68));
-  border: 1px solid rgba(26, 37, 64, 0.16);
-  box-shadow: 0 18px 48px rgba(16, 20, 34, 0.18);
-  backdrop-filter: blur(14px) saturate(1.1);
-  -webkit-backdrop-filter: blur(14px) saturate(1.1);
-}
-.export-mode .hud-glass--light {
-  background: rgba(255, 255, 255, var(--hud-glass-alpha, 0.93));
-  backdrop-filter: none; -webkit-backdrop-filter: none;
-}
-
 /* ---- 毛玻璃模糊总关 ----
    导出是透明背景,backdrop-filter 没有画面可糊,必然丢失。
    预览这边也一起关掉,预览看到的就等于成片(所见即所得)。
@@ -1018,3 +981,18 @@
   translate: calc(var(--br-hx, 0px) + var(--br-x, 0px)) calc(var(--br-hy, 0px) + var(--br-y, 0px));
   rotate: var(--br-hr, 0deg);
 }
+
+/* 各组只决定位置。卡片各自形成绘制层，可跨组调整遮挡。 */
+.overlay-layout { display: contents; }
+.overlay-layout .overlay-layout-group { z-index: auto; pointer-events: none; }
+.overlay-layout-card { position: absolute; inset: 0; pointer-events: none; transform-origin: 0 0; }
+.overlay-layout-member { position: relative; pointer-events: none; transform-origin: 0 0; }
+.overlay-layout-member[data-layout-probe] { position: absolute; top: 0; left: 0; visibility: hidden; }
+.overlay-layout-member[data-layout-probe] * { pointer-events: none !important; }
+.overlay-layout-group > .overlay-layout-member .hud-anchor {
+  transform: translate(var(--hud-ox, 0px), var(--hud-oy, 0px));
+}
+.overlay-layout-group > [data-seg-head] .hud-anchor { transform: none; }
+.overlay-layout-card .hud-anchor, .overlay-layout-member .hud-anchor { pointer-events: auto; }
+.overlay-layout-card .ctrack-cue { pointer-events: auto; }
+.overlay-layout-card .detached-card-shape .hud-anchor { transform: none; }

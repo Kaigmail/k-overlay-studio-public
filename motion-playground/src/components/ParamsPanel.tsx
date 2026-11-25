@@ -1,4 +1,8 @@
-import { useRef, useState } from "react";
+import { FieldEditor, type FieldEdit } from "./FieldEditor";
+import { normalizeCurvePoints, parseNumericText, splitRankRow } from "../overlay/numeric-text";
+import { editPointer } from "./editPointer";
+import { SCALE_MIN, SCALE_MAX, SCALE_STEP } from "../overlay/placement";
+import { useId, useRef, useState } from "react";
 import { uploadErrText } from "../uploadErr";
 import type { Control, EffectDef } from "../effects/types";
 import { EFFECT_GROUPS } from "../effects/registry";
@@ -16,6 +20,9 @@ interface ParamsPanelProps {
   card?: OverlayCard | null;
   /** 时间轴模式但没选卡:显示空状态引导 */
   editMode?: boolean;
+  cardTime: number;
+  canLocateCard: boolean;
+  onLocateCard: (card: OverlayCard) => void;
   onTimeChange?: (key: "start" | "end", value: number) => void;
   /** 时间轴模式:把选中卡片替换成另一种特效 */
   onKindChange?: (kind: string) => void;
@@ -26,6 +33,16 @@ interface ParamsPanelProps {
   /** 时间轴模式:删除选中卡片 */
   onDelete?: (id: string) => void;
   onResetPlacement?: () => void;
+  onDetach?: () => void;
+  groupName?: string;
+  moveGroup?: boolean;
+  onToggleMoveGroup: () => void;
+  editScale?: number;
+  onBeginScale: () => void;
+  onFinishScale: (commit: boolean) => void;
+  onEditScale?: (scale: number) => void;
+  onBeginEdit: (key: string) => void;
+  onFinishEdit: (commit: boolean) => void;
   /** 效果库模式:把当前效果(连同调好的参数)插到时间轴的当前时刻 */
   onAddToTimeline?: () => void;
   /** 效果库模式:插入落点(秒),写进按钮文案让人按之前就知道加到哪 */
@@ -50,9 +67,9 @@ const SCALE_CONTROL: Control = {
   key: "scale",
   label: "卡片大小",
   type: "range",
-  min: 0.4,
-  max: 3,
-  step: 0.05,
+  min: SCALE_MIN,
+  max: SCALE_MAX,
+  step: SCALE_STEP,
   unit: "×",
 };
 
@@ -190,11 +207,18 @@ function ControlRow({
   control,
   value,
   onChange,
+  onRangeStart,
+  onRangeEnd,
+  fieldEdit,
 }: {
   control: Control;
   value: unknown;
   onChange: (v: unknown) => void;
+  fieldEdit?: FieldEdit;
+  onRangeStart?: () => void;
+  onRangeEnd?: (commit: boolean) => void;
 }) {
+  const fieldId = useId();
   if (control.type === "range") {
     const num = Number(value);
     return (
@@ -212,6 +236,11 @@ function ControlRow({
           max={control.max}
           step={control.step}
           value={num}
+          onPointerDown={(event) => {
+            if (event.button !== 0 || !onRangeStart || !onRangeEnd) return;
+            onRangeStart();
+            editPointer(event.pointerId, () => {}, onRangeEnd);
+          }}
           onChange={(e) => onChange(Number(e.target.value))}
         />
       </label>
@@ -239,17 +268,14 @@ function ControlRow({
 
   if (control.type === "text") {
     return (
-      <label className="ctrl">
+      <div className="ctrl">
         <div className="ctrl-head">
-          <span>{control.label}</span>
+          <label htmlFor={fieldId}>{control.label}</label>
         </div>
-        <input
-          type="text"
-          className="ctrl-input"
-          value={String(value ?? "")}
-          onChange={(e) => onChange(e.target.value)}
-        />
-      </label>
+        {fieldEdit ? <FieldEditor id={fieldId} label={control.label} value={String(value ?? "")} multiline={false}
+          onChange={onChange} edit={fieldEdit} /> : <input id={fieldId} type="text" className="ctrl-input"
+          value={String(value ?? "")} onChange={(e) => onChange(e.target.value)} />}
+      </div>
     );
   }
 
@@ -266,12 +292,9 @@ function ControlRow({
             <pre>{control.help}</pre>
           </details>
         )}
-        <textarea
-          className="ctrl-input ctrl-textarea"
-          rows={control.rows ?? 6}
-          value={String(value ?? "")}
-          onChange={(e) => onChange(e.target.value)}
-        />
+        {fieldEdit ? <FieldEditor label={control.label} value={String(value ?? "")} multiline rows={control.rows ?? 6}
+          onChange={onChange} edit={fieldEdit} /> : <textarea className="ctrl-input ctrl-textarea"
+          rows={control.rows ?? 6} value={String(value ?? "")} onChange={(e) => onChange(e.target.value)} />}
       </div>
     );
   }
@@ -348,6 +371,8 @@ function renderControl(
   params: any,
   onChange: (key: string, value: unknown) => void,
   globalBreath = false,
+  range?: { begin: () => void; end: (commit: boolean) => void },
+  fieldEdit?: FieldEdit,
 ) {
   if (c.key === "breath") {
     const own = params.breath as boolean | undefined;
@@ -380,6 +405,9 @@ function renderControl(
     <ControlRow
       key={c.key}
       control={c}
+      onRangeStart={range?.begin}
+      onRangeEnd={range?.end}
+      fieldEdit={fieldEdit}
       value={c.key === "bgLightness" ? Number(params[c.key]) || 0 : params[c.key]}
       onChange={(v) => onChange(c.key, v)}
     />
@@ -392,12 +420,25 @@ export function ParamsPanel({
   onChange,
   card,
   editMode,
+  cardTime,
+  canLocateCard,
+  onLocateCard,
   onLayer,
   layer,
   onTimeChange,
   onKindChange,
   onDelete,
   onResetPlacement,
+  onDetach,
+  groupName,
+  moveGroup,
+  onToggleMoveGroup,
+  editScale,
+  onBeginScale,
+  onFinishScale,
+  onEditScale,
+  onBeginEdit,
+  onFinishEdit,
   onAddToTimeline,
   addAt = 0,
   addSec = 5,
@@ -467,6 +508,53 @@ export function ParamsPanel({
     ...(card && editMode && !BREATH_STILL.has(effect.id) ? [BREATH_CONTROL] : []),
   ].filter((c) => !ownKeys.has(c.key));
   const all: Control[] = [...own, ...universal];
+  const isRing = effect.id === "ring-metric";
+  const fieldEdit = (key: string, numeric = false, curve = false): FieldEdit | undefined => card ? {
+    begin: () => onBeginEdit(`field:${card.id}:${key}`),
+    end: onFinishEdit,
+    ...(numeric && { normalize: (text: string) => parseNumericText(text)?.text }),
+    ...(curve && { normalize: (text: string) => normalizeCurvePoints(text, true) }),
+  } : undefined;
+  const controlRows = (c: Control) => {
+    const wholeNumber = effect.id === "stat-proof" && c.key === "value";
+    const ringNumber = isRing && ["value", "max"].includes(c.key);
+    const curve = effect.id === "growth-curve" && c.key === "points";
+    const ringPrecision = isRing && c.key === "decimals" && typeof params.value === "string";
+    const numeric = parseNumericText(params[c.key]);
+    const display = wholeNumber ? numeric?.text ?? params[c.key] : ringNumber ? numeric?.value ?? 0
+      : curve ? normalizeCurvePoints(String(params[c.key] ?? ""), false)
+      : ringPrecision ? params.valuePrecision ?? parseNumericText(params.value)?.decimals ?? numeric?.value : params[c.key];
+    const change = (key: string, value: unknown) => onChange(ringPrecision ? "valuePrecision" : key, value);
+    const main = renderControl(
+      c, { ...params, [c.key]: display, scale: params.scale ?? 1, speed: params.speed ?? 1 }, change, globalBreath,
+      card && c.type === "range" ? { begin: () => onBeginEdit(`range:${card.id}:${c.key}`), end: onFinishEdit } : undefined,
+      fieldEdit(c.key, wholeNumber, curve),
+    );
+    if (card && ringNumber) {
+      return <div key={c.key}>{main}<div className="ctrl">
+        <FieldEditor key={card.id} label={c.label + "（输入）"} value={numeric?.text ?? ""} multiline={false}
+          onChange={(value) => {
+            onChange(c.key, value);
+            if (c.key === "value" && params.valuePrecision !== undefined) onChange("valuePrecision", undefined);
+          }} edit={fieldEdit(c.key, true)!} />
+      </div></div>;
+    }
+    if (card && effect.id === "rank-bars" && c.key === "rows") {
+      const rows = String(params.rows ?? "").split("|");
+      return <div key={c.key}>{main}{rows.map((row, index) => {
+        const { name, raw, head } = splitRankRow(row);
+        if (!name) return null;
+        return <div key={index} className="ctrl">
+          <div className="ctrl-head"><span>{name}</span></div>
+          <FieldEditor key={card.id} label={`${name} 数值`} value={parseNumericText(raw)?.text ?? raw.trim()} multiline={false}
+            onChange={(value) => onChange("rows", rows.map((item, i) =>
+              i === index ? head + (raw.match(/^\s*/)?.[0] ?? "") + value + (raw.trim() ? raw.match(/\s*$/)?.[0] ?? "" : "") : item).join("|"))}
+            edit={fieldEdit(`rows:${index}`, true)!} />
+        </div>;
+      })}</div>;
+    }
+    return main;
+  };
   const grouped = new Map<Group, Control[]>();
   for (const c of all) {
     const g = groupOf(c);
@@ -484,6 +572,13 @@ export function ParamsPanel({
           {effect.name}
           <em>{effect.description.split(" · ")[0]}</em>
         </span>
+        {card && (
+          <div className="pp-card-timing">
+            <span>{cardTime < card.start ? "当前帧未出场" : cardTime >= card.end ? "当前帧已退场" : "当前帧在场"} · {card.start.toFixed(3)}–{card.end.toFixed(3)} 秒</span>
+            <button type="button" className="video-btn" disabled={!canLocateCard} onClick={() => onLocateCard(card)}>定位到卡片</button>
+            {!canLocateCard && <small>该时段没有可定位的成品帧。</small>}
+          </div>
+        )}
       </div>
 
       <div className="ctrl-list">
@@ -601,24 +696,37 @@ export function ParamsPanel({
           const items = grouped.get(id);
           if (!items?.length) return null;
           return (
-            <section className="pp-sec" key={id}>
+            <section className="pp-sec" key={`${card?.id ?? effect.id}:${id}`}>
               <div className="pp-sec-head">
                 <span>{label}</span>
                 <i>{en}</i>
               </div>
               {id === "layout" && onResetPlacement && (
                 <div className="ctrl">
-                  <button type="button" className="video-btn" onClick={onResetPlacement}>恢复默认位置</button>
+                  <button type="button" className="video-btn" onClick={onResetPlacement}>恢复编排位置与大小</button>
+                  {groupName && <>
+                    <span className="ctrl-hint">分组 {groupName}</span>
+                    <button type="button" className="video-btn" aria-pressed={!!moveGroup}
+                      disabled={editScale === undefined} onClick={onToggleMoveGroup}>移动整组</button>
+                    <button type="button" className="video-btn" disabled={!onDetach} onClick={onDetach}>脱离自动排版</button>
+                  </>}
                 </div>
               )}
-              {items.map((c) =>
-                renderControl(
-                  c,
-                  { ...params, scale: params.scale ?? 1, speed: params.speed ?? 1 },
-                  onChange,
-                  globalBreath,
-                ),
-              )}
+              {items.map((c) => card && c.key === "scale" ? (
+                <label className="ctrl" key={c.key}>
+                  <div className="ctrl-head"><span>卡片大小</span>
+                    <output data-edit-scale>{editScale === undefined ? "定位到卡片后调整" : `${Number(editScale.toFixed(3))}×`}</output>
+                  </div>
+                  <input type="range" aria-label="卡片大小" min={SCALE_MIN} max={SCALE_MAX} step={SCALE_STEP}
+                    value={editScale ?? 1} disabled={editScale === undefined}
+                    onPointerDown={(event) => {
+                      if (event.button !== 0) return;
+                      onBeginScale();
+                      editPointer(event.pointerId, () => {}, onFinishScale);
+                    }}
+                    onChange={(event) => onEditScale?.(Number(event.target.value))} />
+                </label>
+              ) : controlRows(c))}
             </section>
           );
         })}

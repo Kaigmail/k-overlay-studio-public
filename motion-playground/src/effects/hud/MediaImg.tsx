@@ -1,116 +1,98 @@
-import type { CSSProperties } from "react";
+import { useContext, useLayoutEffect, useRef, type CSSProperties } from "react";
+import { FxTimelineContext } from "../FxSpeedScope";
+import { mediaTime } from "../../overlay/media-time";
 import { imgRetry } from "./imgRetry";
 
-/** 导出模式下视频不自动播,由导出脚本逐帧 seek */
 const IS_EXPORT =
   typeof window !== "undefined" &&
   new URLSearchParams(window.location.search).get("export") === "1";
 
 export const isVideoSrc = (src: string) => /\.(mp4|mov|webm|m4v)(\?|$)/i.test(src);
 
-/**
- * 卡内视频通用槽:预览用 <video> 静音循环自动播;
- * 导出用 <img> 逐帧换预抽好的帧图(虚拟时钟下 Chrome 媒体管线完全冻结,
- * <video> 永远解不出画面——导出脚本先用 ffmpeg 把视频抽成 JPEG 序列,
- * __seekVideos 按时间轴换 img.src,图片加载不受虚拟时钟影响)。
- * loop = 短素材循环:导出按素材时长取模对位(data-fx-loop)。
- */
-export function FxVideo({
-  src,
-  className,
-  tStart,
-  clipStart,
-  loop,
-  rate,
-  style,
-}: {
+export function FxVideo({ src, className, tStart = 0, clipStart = 0, loop = false, rate = 1, style }: {
   src: string;
   className?: string;
   tStart?: number;
-  /** 从素材的第几秒开始播(同一条视频切出不同片段时用) */
   clipStart?: number;
   loop?: boolean;
-  /** 播放倍速:1.5 / 2 …(长录屏塞进短窗口用);导出侧按倍速换算帧号 */
   rate?: number;
   style?: CSSProperties;
 }) {
-  const clip = clipStart && clipStart > 0 ? clipStart : 0;
-  const spd = rate && rate > 0 ? rate : 1;
+  const timeline = useContext(FxTimelineContext);
+  const clip = Math.max(0, clipStart);
+  const speed = rate > 0 ? rate : 1;
+  const ref = useRef<HTMLVideoElement>(null);
+  const version = useRef<number | undefined>(undefined);
+  const latest = useRef(timeline);
+  latest.current = timeline;
+
+  const align = (video: HTMLVideoElement) => {
+    if (!Number.isFinite(video.duration) || video.duration <= 0) return;
+    const sample = latest.current;
+    video.playbackRate = speed;
+    if (!sample) {
+      if (video.currentTime < clip) video.currentTime = clip;
+      return;
+    }
+    const target = mediaTime(sample.time, { start: tStart, clip, rate: speed, loop, duration: video.duration });
+    const playing = sample.playing && sample.time >= tStart && (loop || target < video.duration);
+    const jumped = version.current !== sample.seekVersion;
+    version.current = sample.seekVersion;
+    const exact = Math.abs(video.currentTime - target);
+    if (!playing) video.pause();
+    if (exact > (playing && !video.paused && !jumped ? 0.1 : 0.0001)) video.currentTime = target;
+    const ready = !video.seeking && video.readyState >= 2 && (playing || exact <= 0.0001);
+    video.dataset.frameReady = String(ready);
+    video.style.visibility = ready ? "" : "hidden";
+    if (playing && ready && video.paused) void video.play().catch(() => {});
+  };
+
+  useLayoutEffect(() => {
+    if (ref.current) align(ref.current);
+  });
+
   if (IS_EXPORT) {
-    return (
-      <img
-        className={className}
-        data-fx-vidimg
-        data-fx-src={src}
-        /* 片段偏移:把卡片起点往前挪 clip 秒,导出取帧就落在素材的 clip 秒处 */
-        data-t-start={(tStart ?? 0) - clip / spd}
-        {...(spd !== 1 ? { "data-fx-rate": String(spd) } : {})}
-        {...(loop ? { "data-fx-loop": "1" } : {})}
-        style={style}
-        alt=""
-      />
-    );
-  }
-  return (
-    <video
+    return <img
       className={className}
-      data-fx-video
-      data-t-start={tStart ?? 0}
-      /* 拖播放头后要把卡内录屏拉回正确位置,得知道素材起播秒和倍速(见 App.tsx alignCardVideos) */
+      data-fx-vidimg
+      data-fx-src={src}
+      data-t-start={tStart}
       data-fx-clip={clip}
-      data-fx-rate={spd}
-      {...(loop ? { "data-fx-loop": "1" } : {})}
-      src={src}
-      muted
-      playsInline
-      preload="auto"
-      autoPlay
-      loop
+      data-fx-rate={speed}
+      data-fx-loop={loop ? "1" : undefined}
       style={style}
-      /* 刚上传完的文件偶发第一次请求落空:自动重试加载几次 */
-      /* 片段偏移:预览里加载完直接跳到 clip 秒;循环回 0 时再跳回去 */
-      onLoadedMetadata={(e) => {
-        e.currentTarget.playbackRate = spd;
-        if (clip) e.currentTarget.currentTime = clip;
-      }}
-      onCanPlay={(e) => { e.currentTarget.playbackRate = spd; }}
-      onTimeUpdate={
-        clip
-          ? (e) => {
-              const v = e.currentTarget;
-              if (v.currentTime < clip - 0.05) v.currentTime = clip;
-            }
-          : undefined
+      alt=""
+    />;
+  }
+
+  return <video
+    key={src}
+    ref={ref}
+    className={className}
+    data-fx-video
+    src={src}
+    muted
+    playsInline
+    preload="auto"
+    autoPlay={!timeline}
+    loop={!timeline || (loop && clip === 0)}
+    style={{ ...style, visibility: timeline ? "hidden" : style?.visibility }}
+    onLoadedMetadata={(e) => align(e.currentTarget)}
+    onLoadedData={(e) => align(e.currentTarget)}
+    onSeeked={(e) => align(e.currentTarget)}
+    onTimeUpdate={timeline ? undefined : (e) => align(e.currentTarget)}
+    onError={(e) => {
+      const video = e.currentTarget;
+      const retry = Number(video.dataset.retry ?? 0);
+      if (retry < 3) {
+        video.dataset.retry = String(retry + 1);
+        setTimeout(() => { if (video.isConnected) video.load(); }, 400);
       }
-      onError={(e) => {
-        const v = e.currentTarget;
-        const n = Number(v.dataset.retry || 0);
-        if (n < 3) {
-          v.dataset.retry = String(n + 1);
-          setTimeout(() => v.load(), 400);
-        }
-      }}
-    />
-  );
+    }}
+  />;
 }
 
-/**
- * 图/视频通用媒体槽:同一个参数位,填图片路径出图,填视频路径出会动的小窗
- * (证据素材本身要是活的)。
- * 视频预览时静音循环;导出时由 __seekVideos 按时间轴对位,data-fx-loop 表示循环短素材。
- */
-export function MediaImg({
-  src,
-  className,
-  tStart,
-}: {
-  src: string;
-  className?: string;
-  /** 时间轴导出用:所在卡片的 start(秒),循环素材按 (t-start)%时长 对位 */
-  tStart?: number;
-}) {
-  if (isVideoSrc(src)) {
-    return <FxVideo src={src} className={className} tStart={tStart} loop />;
-  }
+export function MediaImg({ src, className, tStart }: { src: string; className?: string; tStart?: number }) {
+  if (isVideoSrc(src)) return <FxVideo src={src} className={className} tStart={tStart} loop />;
   return <img className={className} src={src} alt="" onError={imgRetry(src)} />;
 }

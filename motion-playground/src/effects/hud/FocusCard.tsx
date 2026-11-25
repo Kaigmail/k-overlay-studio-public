@@ -45,11 +45,6 @@ export interface FocusCardParams {
   camSize?: number;
 }
 
-/** 导出模式下视频不自动播,由导出脚本逐帧 seek */
-const IS_EXPORT =
-  typeof window !== "undefined" &&
-  new URLSearchParams(window.location.search).get("export") === "1";
-
 /**
  * 人物聚焦卡:全屏纯色底,口播缩进左侧圆角方框,右侧要点胶囊逐条弹入。
  * 成片时口播轨放在动效层之上,按落位框缩放对齐。
@@ -319,8 +314,8 @@ function FocusCard({ params, playToken }: EffectProps<FocusCardParams>) {
         </div>
       </div>
 
-      {/* 口播烤入导出:同一条运镜曲线(预览里由画布的真口播走这条线) */}
-      {IS_EXPORT && p.camSrc && (
+      {/* 显式指定的视频在时间轴预览和导出中共用同一条运镜曲线。 */}
+      {p.__t !== undefined && p.camSrc && (
         <FxVideo
           src={p.camSrc}
           tStart={Number(p.camDelay) || 0}

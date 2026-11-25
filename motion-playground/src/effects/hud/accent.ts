@@ -39,20 +39,6 @@ export const THEME_OPTIONS = [
 /** 玻璃底默认值:默认无底,视觉与旧行为一致 */
 export const GLASS_DEFAULTS = { glass: "none" as const, glassAlpha: 0.6 };
 
-/** 玻璃底 class:none/未设时返回空串,不改变原布局 */
-export function glassClass(glass?: string) {
-  if (glass === "dark") return "hud-glass hud-glass--dark";
-  if (glass === "light") return "hud-glass hud-glass--light";
-  return "";
-}
-
-/** 玻璃底透明度 → CSS 变量 */
-export function glassVars(alpha?: number): CSSProperties {
-  return typeof alpha === "number"
-    ? ({ "--hud-glass-alpha": alpha } as CSSProperties)
-    : {};
-}
-
 /** 位置微调滑块(所有 HUD 卡通用),放在 controls 末尾 */
 export const OFFSET_CONTROLS = [
   { key: "offsetX", label: "水平微调", type: "range", min: -700, max: 700, step: 10, unit: "px" },

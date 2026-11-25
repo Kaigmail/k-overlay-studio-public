@@ -1,11 +1,12 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { cp, mkdir, readFile, stat, symlink, writeFile } from "node:fs/promises";
-import { connect, createServer as createPortReservation } from "node:net";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { connect } from "node:net";
 import { tmpdir } from "node:os";
-import { basename, isAbsolute, join, parse, relative, resolve } from "node:path";
+import { isAbsolute, join, parse, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs, promisify } from "node:util";
+import { isolateWorkspace, withEditor } from "./verify-002/editor.mjs";
 import { generateFixtures } from "./verify-002/fixtures.mjs";
 import { verifyGeometry } from "./verify-002/geometry.mjs";
 import { verifyPreview } from "./verify-002/preview.mjs";
@@ -26,71 +27,6 @@ const suites = new Map([
   ["g5-handoff", verifyG5Handoff],
 ]);
 const usage = "npm run verify:002 -- --suite <smoke|fixtures|preview|geometry|export|desktop|g5-handoff> [--case-dir <path>] [--run-id <id>] [--fixture-run-id <id>] [--baseline-run-id <id>] [--export-run-id <id>]";
-
-async function isolateWorkspace(evidenceDir) {
-  const root = join(evidenceDir, "workspace");
-  await mkdir(root);
-  const configFiles = ["index.html", "package.json", "tsconfig.json", "tsconfig.app.json", "tsconfig.node.json", "lint-rules.default.json", "vite.config.ts"];
-  await Promise.all([
-    ...configFiles.map((file) => cp(join(appRoot, file), join(root, file))),
-    cp(join(appRoot, "src"), join(root, "src"), { recursive: true }),
-    cp(join(appRoot, "public"), join(root, "public"), {
-      recursive: true,
-      filter: (source) => !["_media", "demo"].includes(basename(source)),
-    }),
-    symlink(join(appRoot, "node_modules"), join(root, "node_modules"), "junction"),
-  ]);
-  const scripts = join(root, "scripts");
-  await mkdir(scripts);
-  for (const file of ["export-frames.mjs", "production-api.ts"]) {
-    await cp(join(appRoot, "scripts", file), join(scripts, file));
-  }
-  return root;
-}
-
-async function withEditor({ signal, evidenceDir }, inspect, { isolateUploads = false } = {}) {
-  const { createServer } = await import("vite");
-  const { default: puppeteer } = await import("puppeteer");
-  const port = await new Promise((resolvePort, rejectPort) => {
-    const reservation = createPortReservation();
-    reservation.on("error", rejectPort);
-    reservation.listen(0, "localhost", () => {
-      const { port } = reservation.address();
-      reservation.close((error) => error ? rejectPort(error) : resolvePort(port));
-    });
-  });
-  const root = isolateUploads ? await isolateWorkspace(evidenceDir) : appRoot;
-  const server = await createServer({
-    root,
-    configFile: join(root, "vite.config.ts"),
-    cacheDir: join(evidenceDir, "vite-cache"),
-    server: { host: "localhost", port, strictPort: true, open: false, watch: null },
-  });
-  try {
-    await server.listen();
-    signal.throwIfAborted();
-    const profile = join(evidenceDir, "browser-profile");
-    const executablePath = await puppeteer.executablePath();
-    const isEdge = basename(executablePath).toLowerCase() === "msedge.exe";
-    const browser = await puppeteer.launch({
-      headless: true,
-      pipe: true,
-      args: isEdge ? ["--edge-skip-compat-layer-relaunch"] : [],
-      userDataDir: profile,
-      handleSIGINT: false,
-      handleSIGTERM: false,
-      handleSIGHUP: false,
-    });
-    try {
-      signal.throwIfAborted();
-      return await inspect({ browser, url: `http://localhost:${port}`, profile });
-    } finally {
-      await browser.close();
-    }
-  } finally {
-    await server.close();
-  }
-}
 
 async function smoke(context) {
   await context.check("editor", () =>

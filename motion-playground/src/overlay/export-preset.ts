@@ -5,6 +5,38 @@ export type ExportPreset = {
   fps: 24 | 30 | "30000/1001";
 };
 
+type FrameRate = { numerator: number; denominator: number };
+type TimeRange = { start: number; end: number };
+
+export function frameTime(index: number, rate: FrameRate) {
+  return index * rate.denominator / rate.numerator;
+}
+
+/** 第一个采样时间大于等于 seconds 的成品帧，从索引 0 起。 */
+export function frameAtOrAfter(seconds: number, rate: FrameRate) {
+  const index = Math.max(0, Math.ceil(seconds * rate.numerator / rate.denominator));
+  if (!Number.isSafeInteger(index)) return index;
+  // 乘回帧率可能在整数边界产生舍入差，按实际采样时间校正。
+  if (index > 0 && frameTime(index - 1, rate) >= seconds) return index - 1;
+  if (frameTime(index, rate) < seconds) return index + 1;
+  return index;
+}
+
+export function frameAtOrBefore(seconds: number, rate: FrameRate) {
+  const after = frameAtOrAfter(seconds, rate);
+  return frameTime(after, rate) > seconds ? Math.max(0, after - 1) : after;
+}
+
+export function isVisibleAt(seconds: number, range: TimeRange) {
+  return seconds >= range.start && seconds < range.end;
+}
+
+export function visibleFrameRange(range: TimeRange, rate: FrameRate, totalFrames: number) {
+  const first = frameAtOrAfter(range.start, rate);
+  const endExclusive = Math.min(totalFrames, frameAtOrAfter(range.end, rate));
+  return first < endExclusive ? { first, endExclusive } : null;
+}
+
 function rateOf(value: unknown) {
   if (value === "30000/1001" ||
     (typeof value === "number" && Math.abs(value - 29.97) < 0.01)) {
@@ -48,10 +80,9 @@ export function resolveExport(job: {
   }
   const ratio = resolution === "720p" ? 2 / 3 : 1;
   const fps = rate.numerator / rate.denominator;
-  let frames = Math.max(1, Math.ceil(duration * rate.numerator / rate.denominator));
+  const frames = Math.max(1, frameAtOrAfter(duration, rate));
   if (!Number.isSafeInteger(frames)) throw new Error("导出帧数超出支持范围。");
-  // 按实际采样表达式校正小数边界，避免恰好落在 duration 的帧被纳入。
-  if (frames > 1 && (frames - 1) * rate.denominator / rate.numerator >= duration) frames--;
+
   return {
     aspect, stage, resolution, rate, fps, duration, frames,
     width: Math.round(stage.w * ratio),

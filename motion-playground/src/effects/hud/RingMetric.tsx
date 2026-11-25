@@ -1,3 +1,4 @@
+import { formatNumericText, parseNumericText } from "../../overlay/numeric-text";
 import type { EffectDef, EffectProps } from "../types";
 import { stageGeom } from "../../stage";
 import { useCardElapsed } from "./useTimelineTime";
@@ -15,9 +16,10 @@ export interface RingMetricParams {
   theme: "dark" | "light";
   position: "left" | "right" | "center";
   kicker: string;
-  value: number;
-  max: number;
+  value: number | string;
+  max: number | string;
   decimals: number;
+  valuePrecision?: number;
   unit: string;
   label: string;
   accent: string;
@@ -122,7 +124,11 @@ function rpOffsets(src: string, lines: string[]) {
 }
 
 function RingMetricView({ params, t: tRaw }: { params: RingMetricParams; t: number }) {
-  const { position, kicker, value, max, decimals, unit, label, accent } = params;
+  const { position, kicker, decimals, unit, label, accent } = params;
+  const numerator = parseNumericText(params.value);
+  const denominator = parseNumericText(params.max);
+  const value = numerator?.value ?? 0;
+  const max = denominator?.value ?? 0;
   const end = (params as { __end?: number }).__end;
   const dur = typeof end === "number" ? Math.max(0, end - ((params as { __start?: number }).__start ?? 0)) : Infinity;
   const t = Math.min(Math.max(0, tRaw), dur);
@@ -135,7 +141,10 @@ function RingMetricView({ params, t: tRaw }: { params: RingMetricParams; t: numb
   const LITE = rpRgba(accLite, 1);
 
   const ratio = rpClamp(value / (max || 1), 0, 1);
-  const fmt = (x: number) => x.toLocaleString("en-US", { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+  const exactText = typeof params.value === "string" && params.valuePrecision === undefined ? numerator : undefined;
+  const precision = typeof params.value === "string" ? params.valuePrecision ?? numerator?.decimals ?? decimals : decimals;
+  const format = (x: number) => formatNumericText(x, precision, numerator?.sign);
+  const finalText = exactText?.text ?? format(value);
 
   // ── 版式 ──
   const kick = kicker ?? "";
@@ -162,9 +171,9 @@ function RingMetricView({ params, t: tRaw }: { params: RingMetricParams; t: numb
 
   // 数字:按最终数值定字号,环内(内圈直径 264)放得下;计数过程中字号不跳
   const numEm = (s: string) => Array.from(s).reduce((w, ch) => w + (/[.,]/.test(ch) ? 0.3 : 0.6), 0);
-  const fsNum = rpClamp(256 / (numEm(fmt(value)) - 0.03 * Array.from(fmt(value)).length + (unit ? rpTextW(unit, 0.5, 0) + 0.04 : 0)), 44, 104);
+  const fsNum = rpClamp(256 / (numEm(finalText) - 0.03 * Array.from(finalText).length + (unit ? rpTextW(unit, 0.5, 0) + 0.04 : 0)), 44, 104);
   // 单位保持原样大小写(km 不变 KM)
-  const sub = max > 0 ? `OF ${max.toLocaleString("en-US", { maximumFractionDigits: 2 })}${unit ?? ""}` : "";
+  const sub = max > 0 ? `OF ${denominator?.text}${unit ?? ""}` : "";
 
   // ── 安全区:人脸线 / 不出画;放不下先整体缩,再整体挪进安全带 ──
   // 人脸线只按默认大小(scale=1)、默认位置(offsetX=0)算:拉大就真的变大、拖开就锁住大小只平移;
@@ -354,7 +363,7 @@ function RingMetricView({ params, t: tRaw }: { params: RingMetricParams; t: numb
                   opacity: numOp, transform: `translateY(${((1 - nIn) * 18).toFixed(2)}px) scale(${(0.9 + 0.1 * nIn).toFixed(4)})`,
                 }}
               >
-                <span style={{ textShadow: `0 0 ${(24 * breath * settled).toFixed(1)}px ${rpRgba(acc, 0.35 * settled)}` }}>{fmt(value * v)}</span>
+                <span style={{ textShadow: `0 0 ${(24 * breath * settled).toFixed(1)}px ${rpRgba(acc, 0.35 * settled)}` }}>{pm >= 1 ? finalText : format(value * v)}</span>
                 {unit && <small style={{ fontSize: fsNum / 2, fontWeight: 600, marginLeft: 4, color: LITE, letterSpacing: 0 }}>{unit}</small>}
               </div>
               {sub && (

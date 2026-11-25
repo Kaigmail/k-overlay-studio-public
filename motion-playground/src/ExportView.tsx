@@ -1,12 +1,15 @@
 import { inkVars } from "./effects/hud/accent";
 import { BreathContext } from "./effects/breath";
 import { useEffect, useState } from "react";
+import { flushSync } from "react-dom";
 import "./fonts"; // 自定义字体注册:导出端也要有 @font-face,成片字体才和预览一致
 import { EFFECTS } from "./effects/registry";
 import { FxSpeedScope } from "./effects/FxSpeedScope";
-import { outroFade, parseOverlay, type OverlayDoc } from "./overlay/types";
-import { STAGE, setStage, aspectOfDoc, VERTICAL_STAGE_VARS, verticalBand } from "./stage";
-import { VerticalCardFit } from "./components/VerticalCardFit";
+import { parseOverlay, type OverlayCard, type OverlayDoc } from "./overlay/types";
+import { cardFrame } from "./overlay/card-frame";
+import { mediaTime, sourceFrameAt } from "./overlay/media-time";
+import { STAGE, setStage, aspectOfDoc, VERTICAL_STAGE_VARS } from "./stage";
+import { OverlayLayout } from "./components/OverlayLayout";
 import "./effects/hud/hud.css";
 import "./App.css";
 
@@ -14,23 +17,16 @@ import "./App.css";
  * 导出专用视图(?export=1)
  * 只渲染动效本体:透明背景、无视频、无人物、无参考线、无UI。
  * 渲染整条时间轴(&doc=<overlay json>),卡片按 start/end 出现;
- * 动效在导出脚本调用 window.__startExport() 后才开始,
- * 无头浏览器用「虚拟时间」从 t=0 逐帧精确推进。
+ * 导出脚本逐帧传入节目时间，React 提交后才读取目标素材。
  */
 
 function renderCard(
-  card: {
-    id: string;
-    kind: string;
-    start?: number;
-    end?: number;
-    seg?: string;
-    params: Record<string, unknown>;
-  },
+  card: OverlayCard,
   fxScale: number,
   jobSpeed: number,
-  t?: number,
+  t: number,
   cam?: string,
+  measurement = false,
 ) {
   const def = EFFECTS.find((e) => e.id === card.kind);
   if (!def) return null;
@@ -38,36 +34,29 @@ function renderCard(
   const side = (card.params.side as string) ?? "left";
   // __start:让卡内视频知道自己相对整条时间轴的起点
   // __t/__end:让时间感知卡(章节条/字幕层)拿到时间轴当前秒和自己的终点
-  const params: Record<string, unknown> = { ...card.params, __start: card.start ?? 0, __t: t, __end: card.end };
+  const params: Record<string, unknown> = { ...card.params, __start: card.start, __t: t, __end: card.end };
   // 运镜卡的口播:单卡没传就用全局口播(doc.cam),按时间轴自动对位
   if (cam && !params.camSrc) params.camSrc = cam;
+  if (measurement) params.camSrc = undefined;
   // 每卡缩放/倍速 × 全局值,和 Studio 预览一致
   const scale = fxScale * (Number(card.params.scale) || 1);
   const speed = jobSpeed * (Number(card.params.speed) || 1);
-  // 讲过变浅:时间轴过了 dimAt 秒后整卡压暗让位(仍在场,不退场)
-  const dimAt = Number(card.params.dimAt) || 0;
-  const past = dimAt > 0 && t !== undefined && t >= dimAt;
-  // 退场淡出:卡片走到 end 就被卸掉,先在这最后一小段把它淡走(与 Studio 预览一致)
-  const outro =
-    t === undefined || card.end === undefined
-      ? 1
-      : outroFade(t, { start: card.start ?? 0, end: card.end });
-  const band = STAGE.h > STAGE.w && !card.seg && card.kind !== "focus-card" ? verticalBand(card.kind, card.params) : undefined;
+  const { past, outro, style } = cardFrame(t, card);
   return (
-    <VerticalCardFit key={card.id} band={band} placement={card.params}>
       <div
         style={{
           display: "contents",
           ["--hud-scale" as string]: scale,
-          ["--fx-outro" as string]: outro < 1 ? outro : undefined,
+          ...style,
         }}
         /* 逐卡主题:与 Studio 预览一致 */
         data-card-theme={(card.params.theme as string) || undefined}
+        data-card-id={measurement ? undefined : card.id}
         data-past={past ? "1" : undefined}
-        data-outro={outro < 1 ? "1" : undefined}
+        data-outro={outro === undefined ? undefined : "1"}
         data-dim-mode={(card.params.dimMode as string) || undefined}
       >
-        <FxSpeedScope speed={speed}>
+        <FxSpeedScope speed={speed} time={t} start={card.start}>
           {def.selfPosition ? (
             <C params={params} playToken={1} />
           ) : (
@@ -77,7 +66,6 @@ function renderCard(
           )}
         </FxSpeedScope>
       </div>
-    </VerticalCardFit>
   );
 }
 
@@ -94,70 +82,25 @@ const stageStyle = (scale: number) => {
   } as React.CSSProperties;
 };
 
-/** 整条时间轴导出:虚拟时钟推进,卡片按时间窗挂载/卸载 */
+/** 导出渲染直接取被请求的节目帧。 */
 function TimelineExport({ doc, scale, speed }: { doc: OverlayDoc; scale: number; speed: number }) {
   const [t, setT] = useState(-1);
-
   useEffect(() => {
-    (window as unknown as { __startExport: () => void }).__startExport = () => {
-      const t0 = performance.now();
-      let raf0: number | null = null;
-      const tick = (rafTs: number) => {
-        const p = performance.now();
-        // 量出 CSS 动画钟(rAF 时间戳)相对虚拟时钟的快慢,写进 __fxClockRate,
-        // 各卡的 FxSpeedScope 每帧用它校正 CSS 动画/过渡的 playbackRate
-        if (raf0 === null) raf0 = rafTs;
-        else if (rafTs - raf0 > 50) {
-          const r = (p - t0) / (rafTs - raf0);
-          if (Number.isFinite(r) && r > 0.01 && r < 100)
-            (window as unknown as { __fxClockRate?: number }).__fxClockRate = r;
-        }
-        requestAnimationFrame(tick);
-      };
-      requestAnimationFrame(tick);
-      setT(0);
-    };
-    // 时间轴时间由导出脚本每帧显式下发:页面时钟(performance.now)在帧图
-    // 加载时会被 Chrome 的虚拟时间偷偷快进(约 +10ms/帧),不可信——
-    // 用它推 t 会让视频段之后的所有卡片提前进场
-    (window as unknown as { __setExportT?: (sec: number) => void }).__setExportT = (sec) => {
-      // 卡内计时钩子的权威时钟(见 useAnimation.clockNow)
-      (window as unknown as { __fxExportMs?: number }).__fxExportMs = sec * 1000;
-      setT(sec);
+    const target = window as Window & { __setExportT?: (sec: number) => void; __startExport?: () => void };
+    const sample = (time: number) => flushSync(() => setT(time));
+    target.__setExportT = sample;
+    target.__startExport = () => sample(0);
+    return () => {
+      delete target.__setExportT;
+      delete target.__startExport;
     };
   }, []);
 
-  // 提前 0.05s 挂载:进场动画等 2 帧才触发,让"可见的出现"卡在 start 上(与 Studio 预览一致)
-  const active = t < 0 ? [] : doc.cards.filter((c) => t >= c.start - 0.05 && t < c.end);
-  // 同 seg 的卡进左列自动顺排容器(与 Canvas 预览一致);容器位置 = 段头(首成员)offset
-  const rendered: React.ReactNode[] = [];
-  const seen = new Set<string>();
-  for (const c of active) {
-    if (!c.seg) {
-      rendered.push(renderCard(c, scale, speed, t, doc.cam));
-      continue;
-    }
-    if (seen.has(c.seg)) continue;
-    seen.add(c.seg);
-    const members = active.filter((m) => m.seg === c.seg);
-    const head = members[0];
-    rendered.push(
-      <VerticalCardFit key={`seg-${c.seg}`} placement={head.params} band={doc.aspect === "9:16" ? "upper" : undefined}>
-        <div
-          className="seg-stack"
-          style={{
-            transform: `translate(${Number(head.params.offsetX) || 0}px, ${Number(head.params.offsetY) || 0}px)`,
-          }}
-        >
-          {members.map((m) => renderCard(m, scale, speed, t, doc.cam))}
-        </div>
-      </VerticalCardFit>,
-    );
-  }
   return (
     <BreathContext.Provider value={doc.breath === true}>
       <div
         className={`stage is-hud is-export${doc.glow ? "" : " no-glow"}${aspectOfDoc(doc) === "9:16" ? " is-vertical" : ""}`}
+        data-sampled
         data-theme={doc.theme ?? "dark"}
         style={{
           ...stageStyle(scale),
@@ -165,7 +108,8 @@ function TimelineExport({ doc, scale, speed }: { doc: OverlayDoc; scale: number;
           ...inkVars(doc.inkColor),
         }}
       >
-        {rendered}
+        {t >= 0 && <OverlayLayout doc={doc} time={t}
+          render={(card, sample, measurement) => renderCard(card, scale, speed, sample, doc.cam, measurement)} />}
       </div>
     </BreathContext.Provider>
   );
@@ -175,34 +119,38 @@ export function ExportView() {
   const q = new URLSearchParams(location.search);
   useEffect(() => {
     document.documentElement.classList.add("export-mode");
-    // 导出脚本每帧调用:把卡内视频画面对位到该帧时刻。
-    // 虚拟时钟下 Chrome 媒体管线完全冻结(<video> 加载/seek 永远不完成),
-    // 所以导出脚本先用 ffmpeg 把视频预抽成 JPEG 帧序列(清单注入 __VID_FRAMES),
-    // 这里只换 img.src——普通图片加载在真实时间里照常落地,不受虚拟时钟影响
-    (window as any).__seekVideos = (t: number) => {
-      const man = ((window as any).__VID_FRAMES ?? {}) as Record<
-        string,
-        { dir: string; fps: number; count: number; dur: number }
-      >;
-      document.querySelectorAll<HTMLImageElement>("img[data-fx-vidimg]").forEach((im) => {
-        const m = man[im.getAttribute("data-fx-src") ?? ""];
-        if (!m || !m.count) return;
-        const start = parseFloat(im.getAttribute("data-t-start") || "0");
-        // 倍速:窗口过了 1 秒,素材要往前走 rate 秒
-        const rate = parseFloat(im.getAttribute("data-fx-rate") || "1") || 1;
-        let target = Math.max(0, (t - start) * rate);
-        // 循环短素材(证据小窗):按素材时长取模,播完从头再来
-        if (im.dataset.fxLoop && m.dur > 0) target = target % m.dur;
-        const idx = Math.min(m.count - 1, Math.floor(target * m.fps));
-        const want = `${m.dir}/f_${String(idx + 1).padStart(5, "0")}.jpg`;
-        if (im.getAttribute("src") !== want) im.setAttribute("src", want);
-      });
+    const target = window as Window & {
+      __VID_FRAMES?: Record<string, {
+        dir: string;
+        timestamps: number[];
+        dur: number;
+      }>;
+      __seekVideos?: (time: number) => Promise<void>;
     };
-    // 换 src 后图片需要几毫秒真实时间落地:导出脚本轮询到 0 再截图
-    (window as any).__pendingVidFrames = () =>
-      Array.from(document.querySelectorAll<HTMLImageElement>("img[data-fx-vidimg]")).filter(
-        (im) => im.getAttribute("src") && (!im.complete || !im.naturalWidth),
-      ).length;
+    target.__seekVideos = async (time) => {
+      const images = Array.from(document.querySelectorAll<HTMLImageElement>("img[data-fx-vidimg]"));
+      await Promise.all(images.map(async (image) => {
+        const asset = image.dataset.fxSrc ?? "";
+        const media = target.__VID_FRAMES?.[asset];
+        if (!media?.timestamps.length) {
+          throw new Error(`卡内视频无法读取或抽帧，请检查素材路径并重新导出：${asset}`);
+        }
+        const seconds = mediaTime(time, {
+          start: Number(image.dataset.tStart),
+          clip: Number(image.dataset.fxClip),
+          rate: Number(image.dataset.fxRate),
+          loop: image.dataset.fxLoop === "1",
+          duration: media.dur,
+        });
+        const frame = sourceFrameAt(seconds, media.timestamps);
+        const source = `${media.dir}/f_${String(frame + 1).padStart(5, "0")}.jpg`;
+        if (image.getAttribute("src") !== source) image.src = source;
+        await image.decode().catch((error) => {
+          throw new Error(`卡内视频帧解码失败：${asset}（源帧索引 ${frame}）`, { cause: error });
+        });
+      }));
+    };
+    return () => { delete target.__seekVideos; };
   }, []);
 
   const speed = Number(q.get("spd") ?? 1) || 1;

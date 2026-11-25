@@ -1,3 +1,4 @@
+import { parseNumericText } from "../../overlay/numeric-text";
 import type { EffectDef, EffectProps } from "../types";
 import { stageGeom } from "../../stage";
 import { useCardElapsed } from "./useTimelineTime";
@@ -201,14 +202,11 @@ function StatProof({ params, playToken }: EffectProps<StatProofParams>) {
   const END = typeof ext.__end === "number" ? ext.__end - (ext.__start ?? 0) : Infinity;
   const acc = ACCENT_VAR[accent] ?? ACCENT_VAR.orange;
 
-  // ── 数字:兼容文本输入("128,000" / "3.5");小数位照原卡(整数 0 位,否则 1 位) ──
-  const target = Number(String(params.value ?? "").replace(/[,，\s]/g, "")) || 0;
-  const neg = target < 0;
-  const absT = Math.abs(target);
-  const decimals = Number.isInteger(absT) ? 0 : 1;
-  const finalStr = absT.toLocaleString("en-US", { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
-  const intLen = finalStr.split(".")[0].replace(/,/g, "").length;
-  // 每个字形:数字列(place = 10 的几次方)或静态分隔符(逗号 / 小数点,place 跟左边那列)
+  const numeric = parseNumericText(params.value);
+  const absT = Math.abs(numeric?.value ?? 0);
+  const decimals = numeric?.decimals ?? 0;
+  const finalStr = numeric?.text.replace(/^[+-]/, "") ?? "0";
+  const intLen = finalStr.split(".")[0].length;
   const glyphs: { d: boolean; ch: string; place: number }[] = [];
   {
     let seen = 0;
@@ -218,14 +216,13 @@ function StatProof({ params, playToken }: EffectProps<StatProofParams>) {
       if (ch === ".") {
         afterDot = true;
         glyphs.push({ d: false, ch, place: 0 });
-      } else if (ch === ",") glyphs.push({ d: false, ch, place: intLen - seen });
-      else if (afterDot) glyphs.push({ d: true, ch, place: -++frac });
+      } else if (afterDot) glyphs.push({ d: true, ch, place: -++frac });
       else glyphs.push({ d: true, ch, place: intLen - 1 - seen++ });
     }
   }
-  const lowPlace = -decimals;
+  const lowPlace = -Math.min(20, decimals);
   const unit = (params.suffix ?? "").trim();
-  const pre = (neg ? "−" : "") + (prefix ?? "").trim();
+  const pre = (numeric?.sign ?? "") + (prefix ?? "").trim();
 
   // ── 时间线(秒):计数 C0→C1,时长 = countMs(参考 0.35→2.05,1.7s);停留期各拍跟着落定时刻 C1 平移 ──
   const C0 = 0.35;
@@ -470,7 +467,7 @@ function StatProof({ params, playToken }: EffectProps<StatProofParams>) {
                 )}
                 <div style={{ display: "flex", height: numH, transformOrigin: "50% 100%", transform: `scale(${(1 + thud).toFixed(4)})` }}>
                   {glyphs.map((gl, i) => {
-                    const on = colOn(gl.d ? gl.place : gl.ch === "," ? gl.place : 0);
+                    const on = colOn(gl.d ? gl.place : 0);
                     const a = (0.16 + 0.84 * on) * appear;
                     if (!gl.d) {
                       return (
@@ -491,7 +488,7 @@ function StatProof({ params, playToken }: EffectProps<StatProofParams>) {
                         <div
                           style={{
                             position: "absolute", left: 0, top: 0, width: "100%",
-                            transform: `translateY(${(-colPos(gl.place) * numH).toFixed(2)}px)`,
+                            transform: `translateY(${(-(t >= C1 ? Number(gl.ch) : colPos(gl.place)) * numH).toFixed(2)}px)`,
                             opacity: +a.toFixed(3),
                             filter: sp > 0.2 ? `blur(${Math.min(sp * 0.8, 3).toFixed(2)}px)` : "none",
                           }}

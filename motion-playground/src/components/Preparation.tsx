@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { handoffPrompt, parseHandoff, parsePickedOverlay } from "../overlay/handoff";
 import { productionRequest, subtitleOutputRequest, type DesktopHost, type HandoffRead, type Production, type ProductionContext, type SubtitleOutput } from "../overlay/production";
+import { draftTime, type SavedDraft } from "../overlay/useLocalDraft";
 import type { SrtLine } from "../overlay/srt";
 import type { OverlayDoc } from "../overlay/types";
 import type { Aspect } from "../stage";
@@ -8,11 +9,11 @@ import type { Aspect } from "../stage";
 interface Props {
   desktopHost?: DesktopHost;
   hasEditor: boolean;
-  canRestore: boolean;
+  savedDraft: SavedDraft | null;
   applied: string | null;
   onResume: () => void;
   onManual: (context: ProductionContext | null, aspect: Aspect, video: File | null, lines: SrtLine[] | null) => void;
-  onApply: (context: ProductionContext | null, draft: OverlayDoc, lines: SrtLine[] | null, identity: string, video: File | null) => boolean;
+  onApply: (context: ProductionContext | null, draft: OverlayDoc, lines: SrtLine[] | null, identity: string, video: File | null, warnings?: string[]) => boolean;
   onImport: (file: File, context: ProductionContext | null, video: File | null, lines: SrtLine[] | null) => Promise<void>;
   onDemo: () => void;
   onRestore: () => void;
@@ -234,7 +235,7 @@ export function Preparation(props: Props) {
         setStatus("这份编排已应用，当前编辑内容已保留。");
       } else if (apply && candidate?.identity !== draft.identity) {
         setStatus("交稿文件已更新，请核对这份候选后再确认。");
-      } else if (apply && props.onApply(context, draft.doc, draft.lines, draft.identity, video)) {
+      } else if (apply && props.onApply(context, draft.doc, draft.lines, draft.identity, video, draft.warnings)) {
         setStatus("已应用到时间轴。");
       }
     } catch (cause) {
@@ -272,7 +273,10 @@ export function Preparation(props: Props) {
           <button disabled={busy || awaitingDirectory} onClick={() => void openForEditing()}>手动编排</button>
           <button disabled={busy || awaitingDirectory} onClick={() => importFile.current?.click()}>导入已有编排</button>
           <button disabled={busy} onClick={props.onDemo}>打开示例</button>
-          {props.canRestore && <button disabled={busy} onClick={props.onRestore}>恢复上次草稿</button>}
+          {props.savedDraft && <button disabled={busy} onClick={props.onRestore}>
+            恢复上次草稿 · {props.savedDraft.project.name}
+            {props.savedDraft.savedAt ? ` · ${draftTime(props.savedDraft.savedAt)}` : ""}
+          </button>}
           <a href="/LICENSE.txt" target="_blank" rel="noreferrer" title="K-Overlay-Studio · 原作者一页枝鸥 · 完整授权">关于</a>
           <input ref={importFile} hidden type="file" accept=".json,application/json" onChange={(event) => {
             const file = event.target.files?.[0];
@@ -376,6 +380,7 @@ export function Preparation(props: Props) {
             <strong>编排候选稿</strong>
             <p>{candidate.file?.name ?? subtitle?.name} · {candidate.doc.aspect} · {candidate.doc.cards.length} 张动效卡</p>
             {!candidate.verified && <p>这份编排未核对字幕，请确认内容适合本期。</p>}
+            {!!candidate.warnings?.length && <ul>{candidate.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>}
             {candidate.missing.length ? <ul>{candidate.missing.map((item, index) => <li key={index}>{item}</li>)}</ul> : <p>无待补项</p>}
             <button className="production-primary" disabled={awaitingDirectory || candidate.identity === props.applied} onClick={() => void read(true, candidate.file)}>应用到时间轴</button>
           </section>}

@@ -156,7 +156,7 @@ function overlayExport(): Plugin {
         // Desktop skips watching generated frames. Serve them on demand without involving the dev watcher.
         server.middlewares.use('/_fxframes', async (req, res, next) => {
           if (req.method !== 'GET' && req.method !== 'HEAD') return next()
-          const match = /^\/([\w.-]+-\d+_\d+fps-\d+-\d+s)\/(f_\d{5,}\.jpg)$/.exec((req.url ?? '').split('?')[0])
+          const match = /^\/(source-pts-v1-[a-f0-9]{20}-\d+ms|[\w.-]+-\d+_\d+fps-\d+-\d+s)\/(f_\d{5,}\.jpg)$/.exec((req.url ?? '').split('?')[0])
           if (!match) return next()
           if (!localRequest(req, false)) { res.statusCode = 403; res.end(); return }
           const frame = path.join(server.config.publicDir, '_fxframes', match[1], match[2])

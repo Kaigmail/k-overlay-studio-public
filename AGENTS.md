@@ -1,5 +1,20 @@
 # AGENTS.md — K-Overlay-Studio 开发说明(给 Codex / Claude Code 等 Agent)
 
+## 按用户的任务选择入口
+
+- **安装或升级 Windows 桌面版**：按下方安装流程执行，完整步骤和示例见 [WINDOWS.md](WINDOWS.md)。
+- **用字幕生成编排**：读取 [overlay-fx-generator](.agents/skills/overlay-fx-generator/SKILL.md)，使用用户给出的字幕和输出目录。首页有可复现的 7 秒示例。
+- **修改源码**：继续阅读本文件的架构、不变量及验证协议。
+
+### 在用户电脑上安装
+
+1. 确认 Windows x64、可写安装路径与剩余磁盘空间。已有同版时先验证并复用；升级时解压到新的版本目录，保留已有素材、成品和项目。
+2. 从公开仓库的 [Releases](https://github.com/Kaigmail/k-overlay-studio-public/releases) 选已发布、带 Windows x64 ZIP 和校验文件的版本。用户接受预览版时纳入 prerelease。可用 `gh release list -R Kaigmail/k-overlay-studio-public --exclude-drafts` 枚举，然后用 `gh release view TAG -R Kaigmail/k-overlay-studio-public --json assets` 查准确文件名。没有 gh 时使用 GitHub 公共 Releases API。仅下载同标签下的 ZIP 和 SHA256SUMS.txt，按 ZIP 文件名取对应 SHA-256，用 `Get-FileHash -Algorithm SHA256` 比对，一致后解压。
+3. 逐项检查 Node.js ≥22.12、npm、FFmpeg 和 ffprobe、WebView2 Evergreen Runtime、.NET Framework ≥4.6.2。复用满足版本的安装，缺项从官方渠道或系统包管理器补齐。涉及提权或重启时向用户说明原因。
+4. 从解压后含 WINDOWS.md 的根目录按该版本指南执行：还原音效，进入 motion-playground 运行 `npm.cmd ci`，配置 Puppeteer 渲染浏览器。下载 Chrome 受限时，可按 WINDOWS.md 指定已安装的 Edge。重试前先记录失败命令和错误。
+5. 从本次安装目录打开 `motion-playground/desktop/bin/K-Overlay-Studio.exe`。用随包示例的工作副本导入字幕和编排，改一处文字，导出 720p、24 fps 的透明 MOV。用 ffprobe 确认视频为 ProRes 4444、720×1280、24 fps 并带 alpha。若 Agent 无桌面操作权限，完成可执行步骤，标明桌面启动、导出中哪些尚待验证。
+6. 报告实际标签、安装目录、启动器、样片路径和检查结果。首次体验后，可让用户按 README 的配卡提示词换成自己的字幕。
+
 ## 这个仓库是什么
 
 口播动效编辑台 [jeszhou/overlay-studio](https://github.com/jeszhou/overlay-studio)(作者:一页枝鸥)

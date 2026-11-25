@@ -1,7 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { cardGroup, frameOf, moveBox, own, paintCards, placementParams, preserveGroupOrder, resizeBox, writePlacement, SCALE_STEP, type CardLayout } from "./overlay/placement";
+import type { CardPlacement } from "./overlay/refinement";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { EFFECTS } from "./effects/registry";
 import { Preparation } from "./components/Preparation";
 import { productionRequest, subtitleOutputRequest, type DesktopHost, type OutputDirectory, type ProductionContext } from "./overlay/production";
+import { draftTime, readDraft, useLocalDraft, type DraftProject } from "./overlay/useLocalDraft";
 import { Sidebar } from "./components/Sidebar";
 import { Canvas } from "./components/Canvas";
 import { ParamsPanel } from "./components/ParamsPanel";
@@ -13,9 +16,9 @@ import {
   LEGACY_SKIN_MAP,
   type StudioTab,
 } from "./components/TopBar";
-import { parseOverlay, type OverlayCard, type OverlayDoc } from "./overlay/types";
+import { parseOverlay, withOverlayCards, type OverlayCard, type OverlayDoc } from "./overlay/types";
 import { setStage, aspectOfDoc, type Aspect } from "./stage";
-import { resolveExport, type ExportPreset } from "./overlay/export-preset";
+import { frameAtOrBefore, frameTime, isVisibleAt, resolveExport, visibleFrameRange, type ExportPreset } from "./overlay/export-preset";
 import { parseSrt, type SrtLine } from "./overlay/srt";
 import { lintOverlay, mergeLintConfig, type LintConfig, type LintIssue } from "./overlay/lint";
 import { uploadErrText } from "./uploadErr";
@@ -60,7 +63,15 @@ export default function App() {
     retry?: string; camNote?: string; sfxSheet?: string;
   } | null>(null);
   const [saving, setSaving] = useState(false);
+  const jsonRequest = useRef<object | null>(null);
+  const [jsonDelivery, setJsonDelivery] = useState<{ text: string; error?: boolean } | null>(null);
+  const [draftProject, setDraftProject] = useState<DraftProject | null>(null);
+  const documentLoadRequest = useRef(0);
+  const subtitleRequest = useRef(0);
+  const manualStarter = useRef<OverlayDoc | null>(null);
+  const mediaRequest = useRef(0);
   const [committedDraft, setCommittedDraft] = useState<OverlayDoc | null>(null);
+  const deliveredSubtitles = useRef<SrtLine[] | null>(null);
   // 明牌双模式:编辑台(视频+时间轴,像剪映)/ 效果库(挑卡调样式)
   const [tab, setTab] = useState<StudioTab>("edit");
   const [selectedId, setSelectedId] = useState(EFFECTS[0].id);
@@ -73,6 +84,7 @@ export default function App() {
   const [showPerson, setShowPerson] = useState(true);
   // 导入的本地视频(object URL):编辑台=停在首帧等播放;效果库=静音循环当背景
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  const [restoredVideoUrl, setRestoredVideoUrl] = useState<string>();
   const uploadedVideo = useRef<File | null>(null);
   // 视频落盘期间锁住导入按钮。以前这里没有任何状态:传一条几百 MB 的口播要几十秒,
   // 界面全程毫无反应(画面里的视频还先被清掉了),换谁都会再点一次 —— 而同一个素材
@@ -149,11 +161,19 @@ export default function App() {
   }, [overlay?.aspect, !!overlay, trialAspect]);
   const [curT, setCurT] = useState(0);
   const [playing, setPlaying] = useState(false);
+  const [loopCardId, setLoopCardId] = useState<string | null>(null);
+  const [seekVersion, setSeekVersion] = useState(0);
   const [selCardId, setSelCardId] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
 
   // ---- 学习闭环:记住本次导入的「AI 初选」,导出时连同终选一起落盘 ----
   const originRef = useRef<OverlayDoc | null>(null);
+  const transactionRef = useRef<{ key: string; before: Snap; draft: OverlayDoc | null } | null>(null);
+  const wheelTimer = useRef<number | undefined>(undefined);
+  const layoutRef = useRef(new Map<string, CardLayout>());
+  const [layoutScale, setLayoutScale] = useState<number | undefined>();
+  const [moveGroup, setMoveGroup] = useState(false);
+  const [, setHistoryRevision] = useState(0);
 
   // ---- 检查器:导入 JSON 时自动跑,只提醒不阻断;忽略标记写进卡片随 JSON 持久化 ----
   const [lintIssues, setLintIssues] = useState<LintIssue[]>([]);
@@ -162,8 +182,6 @@ export default function App() {
   // ---- 字幕稿(SRT):点句跳转 / 标记覆盖情况 ----
   const [srt, setSrt] = useState<SrtLine[] | null>(null);
 
-  // 浏览器草稿由准备页显式恢复。
-  const AUTOSAVE_KEY = "overlayStudioAutosave";
   // 「学一下」是这套工具里唯一一个用户发现不了的能力 —— 不主动说,它就等于不存在。
   // 每次导出都会落一份 review-log(初选 vs 终选),但用户不说那三个字就没人去读。
   // 第 1 次和第 3 次导出各提醒一次:第 1 次让他知道有这回事,第 3 次他已经攒够改动了。
@@ -273,29 +291,64 @@ export default function App() {
     };
   }, []);
 
-  const [canRestore, setCanRestore] = useState(() => {
-    try {
-      const item = JSON.parse(localStorage.getItem(AUTOSAVE_KEY) || "null");
-      return !!item?.overlay?.cards?.length || typeof item?.videoUrl === "string";
-    } catch { return false; }
-  });
+  const committedOverlay = transactionRef.current ? transactionRef.current.before.overlay : overlay;
+  const draftOrigin = originRef.current;
+  const savedVideoUrl = videoUrl?.startsWith("/_media/") ? videoUrl : restoredVideoUrl;
+  const pristineManual = committedOverlay === manualStarter.current && !srt?.length && !savedVideoUrl;
+  const draftSnapshot = useMemo(() => draftProject && committedOverlay && !example ? {
+    project: draftProject,
+    overlay: committedOverlay,
+    origin: draftOrigin,
+    srt,
+    videoUrl: savedVideoUrl,
+  } : null, [draftProject, committedOverlay, draftOrigin, srt, savedVideoUrl, example]);
+  const draft = useLocalDraft(draftSnapshot, pristineManual);
+  const hasEditableDraft = ({ overlay: doc, srt: lines, draftProject: project, manualStarter: starter }:
+    Pick<Snap, "overlay" | "srt" | "draftProject" | "manualStarter">) =>
+    !!doc && (doc.cards.length > 0 || !!lines?.length || (!!project && doc !== starter && doc !== committedDraft));
+  const hasCurrentDraft = hasEditableDraft({ overlay, srt, draftProject, manualStarter: manualStarter.current });
+
+  const invalidateDocument = () => {
+    documentLoadRequest.current++;
+    subtitleRequest.current++;
+    mediaRequest.current++;
+    setRestoredVideoUrl(undefined);
+    setVideoBusy(false);
+    if (jsonRequest.current) {
+      jsonRequest.current = null;
+      setSaving(false);
+    }
+    setJsonDelivery(null);
+    draft.cancel();
+  };
 
   const restoreDraft = () => {
-    if (overlay?.cards.length && !confirm("恢复草稿会替换当前编排，继续吗？")) return;
+    if (hasCurrentDraft && !confirm("恢复草稿会替换当前编排，继续吗？")) return;
     try {
-      const saved = JSON.parse(localStorage.getItem(AUTOSAVE_KEY) || "null");
+      const { raw, saved } = readDraft();
       if (!saved) throw new Error("没有可恢复的草稿。");
       const result = saved.overlay ? parseOverlay(saved.overlay) : null;
       if (result?.error) throw new Error(result.error);
+      const doc = result?.doc ?? { version: 1 as const, aspect: "9:16" as const, cards: [] };
+      const lines = Array.isArray(saved.srt) && saved.srt.length ? saved.srt : null;
+      const url = typeof saved.videoUrl === "string" && saved.videoUrl.startsWith("/_media/")
+        ? saved.videoUrl : undefined;
       resetSource();
-      openDocument(result?.doc ?? { version: 1, aspect: "9:16", cards: [] }, result?.dropped);
+      openDocument(doc, result?.dropped, result?.warnings, saved.project);
       originRef.current = saved.origin ?? null;
-      setSrt(Array.isArray(saved.srt) && saved.srt.length ? saved.srt : null);
-      if (typeof saved.videoUrl === "string" && saved.videoUrl.startsWith("/_media/")) {
-        const url = saved.videoUrl;
-        fetch(url, { method: "HEAD" }).then((r) => r.ok && setVideoUrl(url)).catch(() => {});
+      setSrt(lines);
+      setRestoredVideoUrl(url);
+      if (url) {
+        const request = mediaRequest.current;
+        void fetch(url, { method: "HEAD" }).then((response) => {
+          if (response.ok && request === mediaRequest.current) {
+            setVideoUrl(url);
+            setRestoredVideoUrl(undefined);
+          }
+        }).catch(() => {});
       }
-      setProduction(null);
+      draft.resume({ project: saved.project, overlay: doc, origin: originRef.current, srt: lines, videoUrl: url }, saved, raw);
+      setEntryProduction(null);
       setApplied(null);
     } catch (error) { alert(String(error)); }
   };
@@ -315,31 +368,6 @@ export default function App() {
     setOverlay((o) => (o && !o.cam ? { ...o, cam: videoUrl } : o));
   }, [overlay, videoUrl]);
 
-  // 独立示例不占用用户的浏览器草稿。
-  const saveBrowserDraft = () => {
-    if (example || !overlay?.cards.length) return;
-    try {
-      localStorage.setItem(AUTOSAVE_KEY, JSON.stringify({
-        overlay,
-        origin: originRef.current,
-        srt,
-        videoUrl: videoUrl?.startsWith("/_media/") ? videoUrl : undefined,
-        savedAt: new Date().toISOString(),
-      }));
-      setCanRestore(true);
-    } catch {
-      /* 存储异常不打扰编辑 */
-    }
-  };
-
-  useEffect(() => {
-    const id = setTimeout(saveBrowserDraft, 800);
-    return () => clearTimeout(id);
-    // videoUrl 也要在依赖里:少了它,「清除视频」之后不会重新落盘,存档里留着旧地址,
-    // 刷新一次视频又回来了 —— 用户看到的就是「清了个寂寞」。
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [overlay, srt, videoUrl, example]);
-
   // ---- 撤销/重做(⌘Z / ⇧⌘Z):存 overlay + 字幕稿 快照 ----
   // 字幕稿也要进快照:「清空」会把它一起清掉,而弹窗承诺了能 ⌘Z 撤销 ——
   // 只记 overlay 的话,撤销回来卡片在、字幕稿没了,自动存档还会顺手把最后一份也覆盖掉。
@@ -350,30 +378,69 @@ export default function App() {
     applied: string | null;
     origin: OverlayDoc | null;
     example: boolean;
+    draftProject: DraftProject | null;
+    manualStarter: OverlayDoc | null;
   };
-  const snap = { overlay, srt, production, applied, origin: originRef.current, example };
+  const snap = { overlay, srt, production, applied, origin: originRef.current, example, draftProject,
+    manualStarter: manualStarter.current };
   const snapRef = useRef<Snap>(snap);
   snapRef.current = snap;
   const undoRef = useRef<Snap[]>([]);
   const redoRef = useRef<Snap[]>([]);
-  const lastEditRef = useRef(0);
-
-  /**
-   * 每次改动前调用:把当前 overlay 压进撤销栈。
-   * 400ms 内的连续改动(拖拽/滑块)合并成同一步;force = 独立操作(加卡/导入/换卡)必压。
-   */
-  const pushHistory = (force = false) => {
-    const now = performance.now();
-    const coalesce = !force && now - lastEditRef.current < 400;
-    lastEditRef.current = now;
-    if (coalesce) return;
-    undoRef.current.push(structuredClone(snapRef.current));
+  const recordHistory = (before: Snap) => {
+    undoRef.current.push(structuredClone(before));
     if (undoRef.current.length > 50) undoRef.current.shift();
     redoRef.current = [];
+    setHistoryRevision((revision) => revision + 1);
+  };
+
+  const finishEdit = (commit: boolean) => {
+    window.clearTimeout(wheelTimer.current);
+    const transaction = transactionRef.current;
+    if (!transaction) return;
+    transactionRef.current = null;
+    const { before, draft } = transaction;
+    if (commit && draft !== before.overlay && JSON.stringify(draft) !== JSON.stringify(before.overlay)) {
+      recordHistory(before);
+    } else {
+      snapRef.current = { ...snapRef.current, overlay: before.overlay };
+      setOverlay(before.overlay);
+    }
+  };
+
+  const beginEdit = (key: string) => {
+    if (transactionRef.current?.key === key) return;
+    finishEdit(true);
+    const before = snapRef.current;
+    transactionRef.current = { key, before, draft: before.overlay };
+    if (key.startsWith("field:")) setPlaying(false);
+  };
+
+  const editOverlay = (update: (doc: OverlayDoc) => OverlayDoc) => {
+    const transaction = transactionRef.current;
+    const before = transaction ? transaction.draft : snapRef.current.overlay;
+    if (!before) return;
+    const next = update(before);
+    if (next === before) return;
+    if (transaction) transaction.draft = next;
+    else recordHistory(snapRef.current);
+    snapRef.current = { ...snapRef.current, overlay: next };
+    setOverlay(next);
+  };
+
+  const pushHistory = (_force?: boolean) => {
+    finishEdit(true);
+    recordHistory(snapRef.current);
   };
 
   const applySnap = (s: Snap) => {
+    if (snapRef.current.draftProject?.id !== s.draftProject?.id || snapRef.current.example !== s.example) {
+      invalidateDocument();
+      setLoopCardId(null);
+    }
     if (sourceChanged(snapRef.current.production, s.production)) resetSource();
+    setDraftProject(s.draftProject);
+    manualStarter.current = s.manualStarter;
     setOverlay(s.overlay);
     setSrt(s.srt);
     setProduction(s.production);
@@ -383,14 +450,18 @@ export default function App() {
     originRef.current = s.origin;
   };
   const undo = () => {
+    finishEdit(true);
     if (!undoRef.current.length) return;
     redoRef.current.push(structuredClone(snapRef.current));
     applySnap(undoRef.current.pop()!);
+    setHistoryRevision((revision) => revision + 1);
   };
   const redo = () => {
+    finishEdit(true);
     if (!redoRef.current.length) return;
     undoRef.current.push(structuredClone(snapRef.current));
     applySnap(redoRef.current.pop()!);
+    setHistoryRevision((revision) => revision + 1);
   };
 
   // 编辑台总时长 = max(视频时长, 最后一张卡结束)
@@ -415,94 +486,21 @@ export default function App() {
     return { peak, perMin: overlay.cards.length / Math.max(span / 60, 0.1) };
   }, [overlay]);
 
-  // 时钟(仅编辑台):有视频跟视频走(rAF 读 currentTime),没视频自走
-  useEffect(() => {
-    if (tab !== "edit" || !playing) return;
-    const v = videoRef.current;
-    let raf = 0;
-    let last = performance.now();
-    // 播放被浏览器拒绝时(极少见)老实退回暂停,不让 UI 假装在播
-    if (v) v.play().catch(() => setPlaying(false));
-    const tick = (now: number) => {
-      if (v) {
-        setCurT(v.currentTime);
-        if (v.ended || v.currentTime >= duration) {
-          setPlaying(false);
-          return;
-        }
-      } else {
-        const dt = (now - last) / 1000;
-        last = now;
-        let done = false;
-        setCurT((t) => {
-          const nt = t + dt;
-          if (nt >= duration) {
-            done = true;
-            return duration;
-          }
-          return nt;
-        });
-        if (done) {
-          setPlaying(false);
-          return;
-        }
-      }
-      raf = requestAnimationFrame(tick);
-    };
-    raf = requestAnimationFrame(tick);
-    return () => {
-      cancelAnimationFrame(raf);
-      if (v) v.pause();
-    };
-  }, [tab, playing, duration]);
-
-  /**
-   * 拖播放头之后,把**卡内录屏**也拉回正确位置。
-   *
-   * 卡内 <video> 是 autoPlay 自己走的,只在挂载时起播 —— 顺着播不会错,
-   * 但一旦拖动播放头(卡片重新挂载 / 或本来就在播),它还停在"从挂载算起"的位置,
-   * 时间轴显示 45s、画面其实是录屏的头几秒。导出端是按时间轴逐帧对位的,
-   * 于是**编辑台里看到的和导出的对不上**(实际碰到过)。
-   * 拖完拉一把,两边就一致了。
-   */
-  const alignCardVideos = (t: number) => {
-    document.querySelectorAll<HTMLVideoElement>("video[data-fx-video]").forEach((v) => {
-      const d = v.duration;
-      if (!Number.isFinite(d) || d <= 0) return;
-      const ts = Number(v.dataset.tStart) || 0;
-      const clip = Number(v.dataset.fxClip) || 0;
-      const rate = Number(v.dataset.fxRate) || 1;
-      let want = clip + Math.max(0, t - ts) * rate;
-      // 短素材循环:超出的部分按"素材可播长度"取模,和导出端同一套算法
-      if (v.hasAttribute("data-fx-loop") && want > d) {
-        const span = Math.max(d - clip, 0.1);
-        want = clip + ((want - clip) % span);
-      }
-      const to = Math.min(Math.max(want, 0), d - 0.05);
-      if (Math.abs(v.currentTime - to) > 0.2) v.currentTime = to;
-    });
-  };
-
-  const seek = (t: number) => {
+  const seek = (t: number, syncPausedVideo = false) => {
+    curTRef.current = t;
     setCurT(t);
-    const v = videoRef.current;
-    if (v) v.currentTime = t;
-    // 刚跳过去的那一帧卡片可能还没挂上/元数据没到,补一次
-    requestAnimationFrame(() => alignCardVideos(t));
-    setTimeout(() => alignCardVideos(t), 260);
-  };
-
-  // 从效果库切回编辑台:把视频画面对回时间轴当前位置(效果库里它自己在循环)
-  useEffect(() => {
-    if (tab === "edit" && videoRef.current) {
-      videoRef.current.currentTime = curTRef.current;
+    setSeekVersion((version) => version + 1);
+    const video = videoRef.current;
+    if (video && Number.isFinite(video.duration) &&
+      (syncPausedVideo || !video.paused || (tabRef.current === "edit" && playingRef.current))) {
+      video.currentTime = Math.min(t, video.duration);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab]);
+  };
 
   // 最新播放状态存 ref,给全局快捷键读(避免每帧重挂监听)
+  const playingRef = useRef(false);
+  playingRef.current = playing;
   const curTRef = useRef(0);
-  curTRef.current = curT;
   const selCardIdRef = useRef<string | null>(null);
   selCardIdRef.current = selCardId;
   const deleteRef = useRef<(id: string) => void>(() => {});
@@ -524,6 +522,11 @@ export default function App() {
         tag === "SELECT" ||
         (tag === "INPUT" &&
           ["text", "number", "search"].includes((el as HTMLInputElement).type));
+      if (e.key === "Escape" && transactionRef.current) {
+        e.preventDefault();
+        finishEdit(false);
+        return;
+      }
       if (typing) return;
 
       if ((e.metaKey || e.ctrlKey) && e.code === "KeyZ") {
@@ -547,14 +550,12 @@ export default function App() {
           setPlayToken((t) => t + 1);
         }
       } else if (e.code === "ArrowLeft" || e.code === "ArrowRight") {
+        if (tag === "INPUT" && (el as HTMLInputElement).type === "range") return;
         // 两个模式都可用:效果库里用它挪 ➕ 的插入位置
         e.preventDefault();
         const step = (e.shiftKey ? 3 : 0.5) * (e.code === "ArrowLeft" ? -1 : 1);
         const nt = Math.min(Math.max(0, curTRef.current + step), durRef.current);
-        curTRef.current = nt; // 立刻同步,连按不丢步
-        setCurT(nt);
-        if (videoRef.current) videoRef.current.currentTime = nt;
-        requestAnimationFrame(() => alignCardVideos(nt));   // ←/→ 步进也要拉卡内录屏
+        seek(nt);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -568,22 +569,28 @@ export default function App() {
     lines?: SrtLine[] | null,
   ) => {
     if (!file) return;
-    const text = await file.text();
-    const { doc, error, dropped } = parseOverlay(text);
+    const request = ++documentLoadRequest.current;
+    const text = await file.text().catch((error) => {
+      if (request === documentLoadRequest.current) alert(`❌ JSON 读取失败：${error}`);
+      return null;
+    });
+    if (text === null || request !== documentLoadRequest.current) return;
+    const { doc, error, dropped, warnings } = parseOverlay(text);
     if (error || !doc) {
       alert(`❌ JSON 导入失败:${error}`);
       return;
     }
     // 和「载入示例」一样先问一句。这个入口以前不问:拖错一个 JSON 进窗口,当前编排立刻被换掉,
     // 800ms 后自动存档也跟着被盖 —— ⌘Z 能救,刷新一次就救不回了。
-    if (overlay?.cards.length && !confirm("导入这份编排会替换当前编排(可撤销),继续吗?")) return;
+    const current = snapRef.current;
+    if (hasEditableDraft(current) && !confirm("导入这份编排会替换当前编排(可撤销),继续吗?")) return;
     if (context !== undefined) {
-      if (sourceChanged(production, context)) resetSource();
+      if (sourceChanged(current.production, context)) resetSource();
       setEntryProduction(context);
       setApplied(null);
       setSrt(lines ?? null);
     }
-    openDocument(doc, dropped);
+    openDocument(doc, dropped, warnings, newDraftProject(context === undefined ? current.production : context, file.name));
     if (sourceVideo) void handleVideo(sourceVideo, false);
   };
 
@@ -592,12 +599,23 @@ export default function App() {
     setScreen("edit");
   };
 
-  const openDocument = (doc: OverlayDoc, dropped?: { kind: string; n: number }[]) => {
+  const newDraftProject = (context: ProductionContext | null, filename?: string): DraftProject => ({
+    id: crypto.randomUUID?.() ?? crypto.getRandomValues(new Uint32Array(4)).join("-"),
+    name: context?.subtitle?.name || context?.directory.name || filename || "手动编排",
+  });
+
+  const openDocument = (doc: OverlayDoc, dropped?: { kind: string; n: number }[], warnings?: string[],
+    project: DraftProject | null = null, isManual = false) => {
     pushHistory(true);
+    invalidateDocument();
+    setDraftProject(project);
+    setLoopCardId(null);
     setExample(false);
     setTrialAspect(null);
     setVideoScale(1);
     setCommittedDraft(doc);
+    deliveredSubtitles.current = null;
+    manualStarter.current = isManual ? doc : null;
     enterEditor();
     camClearedRef.current = false; // 新编排:口播视频该挂还得挂
     setOverlay(doc);
@@ -610,6 +628,7 @@ export default function App() {
     // 认不出的卡已经被跳过了,在这儿补一条 error —— 跳过必须看得见,
     // 否则用户只会觉得「导进来好像少了点东西」却说不上少了什么。
     setLintIssues([
+      ...(warnings ?? []).map((message) => ({ level: "warn" as const, rule: "refinement", message })),
       ...(dropped ?? []).map((d) => ({
         level: "error" as const,
         rule: "unknown-kind",
@@ -648,8 +667,7 @@ export default function App() {
     if (!c && issue.at == null) return;
     setTab("edit");
     if (c) {
-      setSelCardId(c.id);
-      seek(c.start + 0.01);
+      locateCard(c);
     } else {
       seek(issue.at! + 0.01);
     }
@@ -657,13 +675,15 @@ export default function App() {
 
   /** 载入内置演示编排(public/demo/):示例 SRT + 示例 JSON,不需要自己的视频 */
   const handleLoadDemo = async () => {
-    if (overlay?.cards.length && !confirm("载入示例会替换当前编排(可撤销),继续吗?")) return;
+    if (hasCurrentDraft && !confirm("载入示例会替换当前编排(可撤销),继续吗?")) return;
+    const request = ++documentLoadRequest.current;
     try {
       const [jsonText, srtText] = await Promise.all([
         fetch("/demo/demo-overlay.json").then((r) => r.text()),
         fetch("/demo/demo.srt").then((r) => r.text()),
       ]);
-      const { doc, error, dropped } = parseOverlay(jsonText);
+      if (request !== documentLoadRequest.current) return;
+      const { doc, error, dropped, warnings } = parseOverlay(jsonText);
       if (error || !doc) {
         alert(`❌ 示例载入失败:${error}`);
         return;
@@ -672,30 +692,46 @@ export default function App() {
       // 留这行 warn 当信号,别让示例悄悄少几张卡还没人发现。
       if (dropped?.length)
         console.warn("[示例] 跳过了认不出的卡:", dropped.map((d) => `${d.kind}×${d.n}`).join(", "));
-      saveBrowserDraft();
+      if (!draft.flush()) {
+        enterEditor();
+        return;
+      }
       resetSource();
       setProduction(null);
       setApplied(null);
-      openDocument(doc);
+      openDocument(doc, undefined, warnings);
       setExample(true);
       const lines = parseSrt(srtText);
       setSrt(lines.length ? lines : null);
     } catch (e) {
-      alert(`❌ 示例载入失败:${e}`);
+      if (request === documentLoadRequest.current) alert(`❌ 示例载入失败:${e}`);
     }
   };
 
   const handleImportSrt = async (file: File | null) => {
     if (!file) return;
-    const lines = parseSrt(await file.text());
+    const request = ++subtitleRequest.current;
+    const text = await file.text().catch((error) => {
+      if (request === subtitleRequest.current) alert(`❌ SRT 读取失败：${error}`);
+      return null;
+    });
+    if (text === null || request !== subtitleRequest.current) return;
+    const lines = parseSrt(text);
     if (!lines.length) {
       alert("❌ SRT 解析失败:没读到任何字幕条。");
       return;
     }
+    pushHistory(true);
+    const current = snapRef.current;
+    const subtitleOverlay = current.overlay ?? { version: 1 as const, aspect: "9:16" as const, cards: [] };
+    if (!current.example) {
+      if (!current.draftProject) setDraftProject(newDraftProject(current.production, file.name));
+      else if (!current.production) setDraftProject({ ...current.draftProject, name: file.name });
+    }
     setSrt(lines);
     // 已有编排且还没有字幕层卡:自动生成一张常驻双语字幕卡(中文先就位,
     // 英文和 *关键词* 由生成器或你在右栏字幕表里补)
-    if (overlay && !overlay.cards.some((c) => c.kind === "caption-track")) {
+    if (current.overlay && !subtitleOverlay.cards.some((c) => c.kind === "caption-track")) {
       const def = EFFECTS.find((e) => e.id === "caption-track");
       const end = Math.ceil(Math.max(...lines.map((l) => l.end)));
       const linesText = lines
@@ -707,51 +743,68 @@ export default function App() {
               .trim()}`,
         )
         .join("\n");
-      pushHistory(true);
-      setOverlay({
-        ...overlay,
-        cards: [
-          ...overlay.cards,
-          {
-            id: `caption-track-${overlay.cards.length + 1}`,
-            kind: "caption-track",
-            start: 0,
-            end,
-            params: { ...(def?.defaults ?? {}), lines: linesText },
-          },
-        ],
-      });
-    }
+      setOverlay(withOverlayCards(subtitleOverlay, [
+        ...subtitleOverlay.cards,
+        {
+          id: `caption-track-${subtitleOverlay.cards.length + 1}`,
+          kind: "caption-track",
+          start: 0,
+          end,
+          params: { ...(def?.defaults ?? {}), lines: linesText },
+        },
+      ]));
+    } else if (!current.overlay) setOverlay(subtitleOverlay);
     setTab("edit");
   };
 
   const handleExportJson = async () => {
-    if (!overlay || saving) return false;
+    if (!overlay || saving || jsonRequest.current) return false;
+    finishEdit(true);
+    const { overlay: doc, srt: subtitles } = snapRef.current;
+    if (!doc) return false;
+    const isCurrent = () => {
+      const current = transactionRef.current?.before ?? snapRef.current;
+      return current.overlay === doc && current.srt === subtitles;
+    };
     if (production) {
+      const request = {};
+      jsonRequest.current = request;
       setSaving(true);
+      setJsonDelivery({ text: "正在交付编排 JSON…" });
       try {
-        let result: { path: string };
-        if (subtitleOutput) {
-          result = await subtitleOutputRequest("save", subtitleOutput.destinationId, { doc: overlay });
-        } else {
-          result = await productionRequest<{ path: string }>("save-json", {
-            root: production.directory.root, subtitle: production.subtitle?.relative, doc: overlay,
+        const result = subtitleOutput
+          ? await subtitleOutputRequest<{ path: string }>("save", subtitleOutput.destinationId, { doc })
+          : await productionRequest<{ path: string }>("save-json", {
+            root: production.directory.root, subtitle: production.subtitle?.relative, doc,
           });
+        if (jsonRequest.current !== request) return false;
+        if (!isCurrent()) {
+          setJsonDelivery(null);
+          return false;
         }
-        setDelivery({ path: result.path });
+        setJsonDelivery({ text: `编排 JSON 已交付：${result.path}` });
       } catch (error) {
-        setDelivery({ path: "", error: String(error) });
+        if (jsonRequest.current === request) {
+          setJsonDelivery(isCurrent() ? { text: `编排 JSON 交付失败：${error}`, error: true } : null);
+        }
         return false;
-      } finally { setSaving(false); }
+      } finally {
+        if (jsonRequest.current === request) {
+          jsonRequest.current = null;
+          setSaving(false);
+        }
+      }
     } else {
-      const blob = new Blob([JSON.stringify(overlay, null, 2)], { type: "application/json" });
+      const blob = new Blob([JSON.stringify(doc, null, 2)], { type: "application/json" });
       const link = document.createElement("a");
       link.href = URL.createObjectURL(blob);
       link.download = "overlay.json";
       link.click();
       URL.revokeObjectURL(link.href);
+      setJsonDelivery({ text: "已发起编排 JSON 下载" });
     }
-    setCommittedDraft(overlay);
+    setCommittedDraft(doc);
+    deliveredSubtitles.current = subtitles;
     // 学习闭环:AI 初选 + 用户终选 一起落盘(失败不打扰导出)
     fetch("/api/review-log", {
       method: "POST",
@@ -759,7 +812,7 @@ export default function App() {
       body: JSON.stringify({
         savedAt: new Date().toISOString(),
         origin: originRef.current,
-        final: overlay,
+        final: doc,
       }),
     }).catch(() => {});
     if (!production) maybeShowLearnTip();
@@ -772,12 +825,15 @@ export default function App() {
     // 导入的视频不在此列,它有自己的「清除」按钮,不该被这里顺手带走。
     if (!confirm("清空这条编排?\n\n卡片和字幕稿都会清掉(导入的视频不受影响)。\n可以用 ⌘Z 撤销。"))
       return;
-    pushHistory(true);
-    if (!example) {
-      try { localStorage.removeItem(AUTOSAVE_KEY); } catch { /* 浏览器可能禁用存储 */ }
-      setCanRestore(false);
+    if (draftProject && !example && !draft.discard(draftProject.id)) {
+      alert("无法清除本机草稿，请重试。");
+      return;
     }
-    setOverlay((doc) => doc ? { ...doc, cards: [] } : null);
+    pushHistory(true);
+    invalidateDocument();
+    setDraftProject(null);
+    setLoopCardId(null);
+    setOverlay((doc) => doc ? withOverlayCards(doc, []) : null);
     setTrialAspect(null);
     setSrt(null);
     setPlaying(false);
@@ -786,21 +842,11 @@ export default function App() {
   };
 
 
-  // 当前时间点应显示的卡片(编辑台)
-  // 提前 0.05s 挂载:进场动画要等 2 帧才触发,提前量让"可见的出现"正卡在 start 上
-  const activeCards = useMemo(
-    () =>
-      overlay
-        ? overlay.cards.filter((c) => curT >= c.start - 0.05 && curT < c.end)
-        : [],
-    [overlay, curT],
-  );
-
   const selCard = overlay?.cards.find((c) => c.id === selCardId) ?? null;
   // 「第几层」只在和它同时出现的卡里数 —— 全局第几张对观众没意义,同屏谁压谁才有
   const layerInfo = (() => {
     if (!overlay || !selCard) return undefined;
-    const co = overlay.cards.filter(
+    const co = paintCards(overlay).filter(
       (c) => c.start < selCard.end && c.end > selCard.start,
     );
     return { index: co.findIndex((c) => c.id === selCard.id) + 1, total: co.length };
@@ -810,47 +856,153 @@ export default function App() {
   // 改选中卡的参数:必须用函数式 setOverlay。
   // 以前是 setOverlay({...overlay, …}),连着调 N 次会 N 次都从同一份旧
   // overlay 出发 —— 只有最后一个 key 生效。
-  const patchCardParams = (patch: Record<string, unknown>) => {
-    if (!selCardId) return;
-    pushHistory();
-    setOverlay((o) =>
-      o
-        ? {
-            ...o,
-            cards: o.cards.map((c) =>
-              c.id === selCardId ? { ...c, params: { ...c.params, ...patch } } : c,
-            ),
-          }
-        : o,
-    );
+  const updateCardParams = (id: string, patch: Record<string, unknown>) => {
+    editOverlay((doc) => {
+      const card = doc.cards.find((item) => item.id === id);
+      if (!card || Object.entries(patch).every(([key, value]) => Object.is(card.params[key], value))) return doc;
+      return { ...doc, cards: doc.cards.map((item) => item === card ? { ...item, params: { ...item.params, ...patch } } : item) };
+    });
   };
   const handleCardParamChange = (key: string, value: unknown) => {
-    patchCardParams({ [key]: value });
+    if (!selCard) return;
+    if (selectedPlacement?.mode === "auto" && Object.hasOwn(placementParams(selCard.kind, { [key]: value }), key)) {
+      editOverlay((doc) => {
+        const card = doc.cards.find(({ id }) => id === selCard.id);
+        const current = card && frameOf(doc, card, shownAspect)?.current;
+        if (!card || current?.mode !== "auto" || Object.is(current.placement?.[key as keyof typeof current.placement], value)) return doc;
+        const placement = placementParams(card.kind, { ...current.placement, [key]: value });
+        return writePlacement(doc, originRef.current, card, shownAspect, getLayout(card.id), { ...current, placement });
+      });
+    } else {
+      updateCardParams(selCard.id, { [key]: value });
+    }
   };
 
   // 更换选中卡片的特效类型(时间/落位保留,参数回到新卡默认值)
   const handleCardKindChange = (kind: string) => {
-    if (!overlay || !selCardId) return;
-    if (!EFFECTS.some((e) => e.id === kind)) return;
-    pushHistory(true);
-    setOverlay({
-      ...overlay,
-      cards: overlay.cards.map((c) =>
-        c.id === selCardId
-          ? {
-              ...c,
-              kind,
-              params: { ...(EFFECTS.find((e) => e.id === kind)?.defaults ?? {}) },
-            }
-          : c,
-      ),
+    if (!selCard || selCard.kind === kind) return;
+    const effect = EFFECTS.find((item) => item.id === kind);
+    if (!effect) return;
+    finishEdit(true);
+    editOverlay((doc) => withOverlayCards(doc, doc.cards.map((card) => card.id === selCard.id ? {
+      ...card, kind, params: { ...effect.defaults, ...placementParams(kind, card.params) },
+    } : card)));
+  };
+
+  const getLayout = (id: string) => layoutRef.current.get(id);
+  const receiveLayout = (layouts: Map<string, CardLayout>) => {
+    layoutRef.current = layouts;
+    if (!playing) setLayoutScale(selCardId ? layouts.get(selCardId)?.scale : undefined);
+  };
+
+  const setCardPlacement = (
+    id: string, layout: CardLayout, change: { dx: number; dy: number } | { scale: number; ax: number; ay: number },
+    wholeGroup = false, wheelOffset = { x: 0, y: 0 },
+  ) => {
+    const aspect = trialAspect ?? aspectOfDoc(snapRef.current.overlay);
+    editOverlay((doc) => {
+      const card = doc.cards.find((item) => item.id === id);
+      if (!card) return doc;
+      const startCard = transactionRef.current?.before.overlay?.cards.find((item) => item.id === id) ?? card;
+      const initialDoc = transactionRef.current?.before.overlay ?? doc;
+      const initial = frameOf(initialDoc, startCard, aspect)?.current;
+      const group = layout.group;
+      const box = wholeGroup && group ? group.box : layout.box;
+      const target = "dx" in change ? { ...box, ...moveBox(box, change.dx, change.dy, aspect), scale: layout.scale }
+        : resizeBox(layout, change.scale, change.ax, change.ay, aspect);
+      const dx = target.x - box.x, dy = target.y - box.y;
+      if (Math.abs(dx) < 0.001 && Math.abs(dy) < 0.001 && Math.abs(target.scale - layout.scale) < 0.00001) {
+        // 回到手势起点时丢掉临时精修覆盖。
+        return transactionRef.current?.key.startsWith("wheel") ? doc : initialDoc;
+      }
+      if (wholeGroup && group) {
+        const saved = own(doc.refinement?.groups, group.name);
+        return {
+          ...doc,
+          refinement: {
+            schema: 1, ...doc.refinement,
+            groups: {
+              ...doc.refinement?.groups,
+              [group.name]: {
+                order: group.order,
+                frames: { ...saved?.frames, [aspect]: { ...group.frame, x: group.frame.x + dx, y: group.frame.y + dy } },
+              },
+            },
+          },
+        };
+      }
+      const current: CardPlacement = group
+        ? { mode: "group", group: group.name, x: dx / group.frame.fit + wheelOffset.x + (initial?.mode === "group" ? initial.x : 0),
+            y: dy / group.frame.fit + wheelOffset.y + (initial?.mode === "group" ? initial.y : 0), scale: target.scale / group.frame.fit }
+        : { mode: "free", x: target.x, y: target.y, scale: target.scale };
+      return writePlacement(doc, originRef.current, card, aspect, layout, current);
     });
+  };
+
+  const scaleCard = (id: string, value: number, layout?: CardLayout) => {
+    const start = layout ?? getLayout(id);
+    if (start) setCardPlacement(id, start, { scale: value, ax: 0.5, ay: 0.5 });
+  };
+
+  const wheelCard = (id: string, delta: number) => {
+    const layout = getLayout(id);
+    if (!layout || !delta) return;
+    selectCard(id);
+    beginEdit(`wheel:${id}`);
+    const aspect = trialAspect ?? aspectOfDoc(snapRef.current.overlay);
+    const doc = snapRef.current.overlay;
+    const card = doc?.cards.find((item) => item.id === id);
+    const current = doc && card ? frameOf(doc, card, aspect)?.current : undefined;
+    const initialDoc = transactionRef.current?.before.overlay;
+    const initial = initialDoc && card ? frameOf(initialDoc, card, aspect)?.current : undefined;
+    const relative = current?.mode === "group" && initial?.mode === "group" ? { x: current.x - initial.x, y: current.y - initial.y }
+      : current?.mode === "group" ? current : { x: 0, y: 0 };
+    // Each wheel event extends the result of the previous event in this burst.
+    setCardPlacement(id, layout, { scale: (Math.round(layout.scale / SCALE_STEP) - Math.sign(delta)) * SCALE_STEP, ax: 0.5, ay: 0.5 }, false, relative);
+    window.clearTimeout(wheelTimer.current);
+    wheelTimer.current = window.setTimeout(() => finishEdit(true), 220);
+  };
+
+  const resetCardPlacement = (id: string) => {
+    finishEdit(true);
+    const aspect = trialAspect ?? aspectOfDoc(snapRef.current.overlay);
+    editOverlay((doc) => {
+      const card = doc.cards.find((item) => item.id === id);
+      if (!card) return doc;
+      const saved = frameOf(doc, card, aspect);
+      const origin = originRef.current?.cards.find((item) => item.id === id);
+      const base = saved?.base ?? {
+        mode: "auto" as const, placement: placementParams(card.kind, origin?.params ?? card.params),
+        ...(card.seg && { group: card.seg }),
+      };
+      if (JSON.stringify(saved?.current) === JSON.stringify(base)) return doc;
+      if (!saved?.current && base.mode === "auto" && (base.group ?? card.seg) === card.seg &&
+          JSON.stringify(placementParams(card.kind, card.params)) ===
+          JSON.stringify(placementParams(card.kind, base.placement ?? {}))) return doc;
+      return writePlacement(doc, originRef.current, card, aspect, getLayout(id), base);
+    });
+    setMoveGroup(false);
+  };
+
+  const detachCard = (id: string) => {
+    finishEdit(true);
+    const layout = getLayout(id);
+    if (!layout?.group) return;
+    const aspect = trialAspect ?? aspectOfDoc(snapRef.current.overlay);
+    editOverlay((doc) => {
+      const card = doc.cards.find((item) => item.id === id);
+      if (!card) return doc;
+      return writePlacement(doc, originRef.current, card, aspect, layout,
+        { mode: "free", x: layout.box.x, y: layout.box.y, scale: layout.scale });
+    });
+    setMoveGroup(false);
   };
 
   // 画布比例(Kai fork · P1):写进编排文件(16:9 时存 undefined,旧文件字节不变),
   // 画布尺寸由上面的 effect 统一跟随;可 ⌘Z 撤销。注意:切换只换画布,卡片落位
   // 仍是横屏逻辑——竖屏三带落位是 P2 的事,别指望切完卡片自动排好。
   const handleAspect = (aspect: Aspect) => {
+    finishEdit(true);
     setPlaying(false);
     setTrialAspect(aspect === (overlay ? aspectOfDoc(overlay) : "9:16") ? null : aspect);
   };
@@ -877,34 +1029,34 @@ export default function App() {
   const handleDeleteCard = (id: string) => {
     pushHistory(true);
     setOverlay((o) =>
-      o ? { ...o, cards: o.cards.filter((c) => c.id !== id) } : o,
+      o ? withOverlayCards(o, o.cards.filter((c) => c.id !== id)) : o,
     );
     setSelCardId((cur) => (cur === id ? null : cur));
+    setLoopCardId((current) => current === id ? null : current);
   };
   deleteRef.current = handleDeleteCard; // 给全局快捷键(Delete)用
 
   // 时间轴色块拖拽:直接写回某张卡的起止时间
   const handleCardTimes = (id: string, start: number, end: number) => {
-    pushHistory();
-    setOverlay((o) =>
-      o
-        ? {
-            ...o,
-            cards: o.cards.map((c) => (c.id === id ? { ...c, start, end } : c)),
-          }
-        : o,
-    );
+    editOverlay((doc) => {
+      const card = doc.cards.find((item) => item.id === id);
+      if (!card || !Number.isFinite(start) || !Number.isFinite(end) || end <= start ||
+          (card.start === start && card.end === end)) return doc;
+      const original = transactionRef.current?.before.overlay;
+      const originalCard = original?.cards.find((item) => item.id === id);
+      if (original && originalCard?.start === start && originalCard.end === end) return original;
+      return { ...preserveGroupOrder(doc, card), cards: doc.cards.map((item) => item === card ? { ...item, start, end } : item) };
+    });
   };
 
   /**
-   * 叠放:把选中卡片在 cards 数组里挪位置。
-   * 画布是按数组顺序画的,**排在后面的压在上面**。
+   * 叠放顺序从底到顶单独保存，时间轴和组内顺排使用各自的顺序。
    * 只在"和它时间上有重叠"的卡之间挪 —— 跟不同时出现的卡换先后没有任何视觉意义,
    * 白白把数组搅乱。挪不动(上面/下面没有重叠的卡了)就原样返回。
    */
   const handleCardLayer = (dir: "up" | "down" | "top" | "bottom") => {
     if (!overlay || !selCardId) return;
-    const cards = overlay.cards.slice();
+    const cards = paintCards(overlay).slice();
     const i = cards.findIndex((c) => c.id === selCardId);
     if (i < 0) return;
     const me = cards[i];
@@ -920,37 +1072,19 @@ export default function App() {
     // 往上挪:插到目标后面(删除自己后目标退了一格,插在 j 正好就是它后面)
     // 往下挪:插到目标前面(目标索引比自己小,删除不影响它,插在 j 就是它前面)
     cards.splice(j, 0, me);
-    setOverlay({ ...overlay, cards });
+    setOverlay({ ...overlay, refinement: { schema: 1, ...overlay.refinement, paintOrder: cards.map(({ id }) => id) } });
   };
 
   // 编辑选中卡片的出现/消失时间(秒)
   const handleCardTimeChange = (key: "start" | "end", value: number) => {
-    if (!overlay || !selCardId || !Number.isFinite(value)) return;
-    pushHistory();
-    setOverlay({
-      ...overlay,
-      cards: overlay.cards.map((c) => {
-        if (c.id !== selCardId) return c;
-        const next = { ...c, [key]: value };
-        return next.end > next.start ? next : c;
-      }),
-    });
+    if (!selCard) return;
+    handleCardTimes(selCard.id, key === "start" ? value : selCard.start, key === "end" ? value : selCard.end);
   };
 
   // 画布直接拖拽/滚轮:给卡片参数打补丁(不触发重放)
   const handleNudge = (cardId: string | null, patch: Record<string, number>) => {
     if (cardId) {
-      pushHistory();
-      setOverlay((o) =>
-        o
-          ? {
-              ...o,
-              cards: o.cards.map((c) =>
-                c.id === cardId ? { ...c, params: { ...c.params, ...patch } } : c,
-              ),
-            }
-          : o,
-      );
+      updateCardParams(cardId, patch);
     } else {
       setParamsById((prev) => ({
         ...prev,
@@ -961,11 +1095,12 @@ export default function App() {
 
   // 效果库 → 时间轴:把当前效果(带调好的参数)插到当前时刻
   const handleAddToTimeline = () => {
+    if (!draftProject && !example) setDraftProject(newDraftProject(production));
     const start = Math.round(curTRef.current * 10) / 10;
     const baseCards = overlay?.cards ?? [];
     let n = baseCards.length + 1;
     while (baseCards.some((c) => c.id === `card-${n}`)) n++;
-    const card = {
+    const card: OverlayCard = {
       id: `card-${n}`,
       kind: selectedId,
       start,
@@ -974,11 +1109,23 @@ export default function App() {
       params: { ...paramsById[selectedId] },
     };
     pushHistory(true);
-    setOverlay((o) =>
-      o
-        ? { ...o, cards: [...o.cards, card].sort((a, b) => a.start - b.start) }
-        : { version: 1 as const, aspect: "9:16" as const, theme: paramsById[selectedId]?.theme, cards: [card] },
-    );
+    setOverlay((o) => {
+      const doc: OverlayDoc = o ? withOverlayCards(o, [...o.cards, card].sort((a, b) => a.start - b.start))
+        : { version: 1 as const, aspect: "9:16" as const, theme: paramsById[selectedId]?.theme, cards: [card] };
+      return {
+        ...doc,
+        refinement: {
+          schema: 1, ...doc.refinement,
+          byCard: {
+            ...doc.refinement?.byCard,
+            [card.id]: { frames: {
+              "9:16": { base: { mode: "auto", placement: placementParams(card.kind, card.params) } },
+              "16:9": { base: { mode: "auto", placement: placementParams(card.kind, card.params) } },
+            } },
+          },
+        },
+      };
+    });
     setSelCardId(card.id);
     // 以前这里 setTab("edit") 把人甩回编辑台:点一下整个界面就变了,是最容易
     // 让人失去方向的一种反馈,想连着加三张卡也得来回切。时间轴两个模式都常驻,
@@ -994,7 +1141,134 @@ export default function App() {
   const preset = exportChoice?.aspect === exportAspect
     ? exportChoice.preset
     : { resolution: "1080p", fps: exportAspect === "16:9" ? "30000/1001" : 30 } as const;
-  const exportSize = resolveExport({ doc: overlay, preset });
+  const exportSize = resolveExport({ doc: overlay, preset, duration: duration || undefined });
+  const sampleFrame = Math.min(exportSize.frames - 1, frameAtOrBefore(curT, exportSize.rate));
+  const sampleTime = frameTime(sampleFrame, exportSize.rate);
+  const activeCards = useMemo(() => overlay?.cards.filter((card) => isVisibleAt(sampleTime, card)) ?? [], [overlay, sampleTime]);
+  const selectedFrames = selCard && duration > 0 ? visibleFrameRange(selCard, exportSize.rate, exportSize.frames) : null;
+
+  const loopCard = loopCardId ? overlay?.cards.find((card) => card.id === loopCardId) : null;
+  const loopFrames = loopCard && visibleFrameRange(loopCard, exportSize.rate, exportSize.frames);
+  const loopStart = loopFrames ? frameTime(loopFrames.first, exportSize.rate) : undefined;
+  const loopEnd = loopFrames && loopCard
+    ? Math.min(loopCard.end, frameTime(loopFrames.endExclusive, exportSize.rate), duration)
+    : undefined;
+
+  useLayoutEffect(() => {
+    if (loopCardId && !loopFrames) setLoopCardId(null);
+  }, [loopCardId, !!loopFrames]);
+
+  // 口播有效时跟随视频时钟，编排超出口播尾部时接续本地时钟。
+  useLayoutEffect(() => {
+    if (tab !== "edit" || !playing) return;
+    const video = videoRef.current;
+    let active = true;
+    let followingVideo = false;
+    let raf = 0;
+    let last = performance.now();
+    const looping = loopStart !== undefined && loopEnd !== undefined;
+
+    const insideVideo = () => !!video && (!Number.isFinite(video.duration) || curTRef.current < video.duration);
+    const syncVideo = () => {
+      if (!video) return;
+      const shouldFollow = insideVideo();
+      if (shouldFollow === followingVideo) return;
+      followingVideo = shouldFollow;
+      if (shouldFollow) video.play().catch(() => { if (active) setPlaying(false); });
+      else video.pause();
+    };
+
+    if (looping && (curTRef.current < loopStart || curTRef.current >= loopEnd)) seek(loopStart, true);
+    if (!looping && video?.ended && curTRef.current >= duration) seek(0, true);
+    syncVideo();
+    const tick = (now: number) => {
+      // 首个动画帧的时间戳可能早于刚切换时钟时读取的 performance.now()。
+      const elapsed = Math.max(0, now - last) / 1000;
+      const next = Math.min(duration, video && insideVideo() && !video.ended
+        ? video.currentTime
+        : Math.max(curTRef.current, video?.currentTime ?? 0) + elapsed);
+      last = now;
+      if (looping && (next < loopStart || next >= loopEnd)) {
+        if (video?.paused) followingVideo = false;
+        seek(loopStart, true);
+      } else {
+        curTRef.current = next;
+        setCurT(next);
+        if (!looping && next >= duration) {
+          setPlaying(false);
+          return;
+        }
+      }
+      syncVideo();
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => {
+      active = false;
+      cancelAnimationFrame(raf);
+      video?.pause();
+    };
+  }, [tab, playing, duration, videoUrl, loopStart, loopEnd]);
+
+  const keepDisplayedPosition = () => {
+    // 保留点击时已显示的位置，避免同一轮尚未提交的播放时钟更新改变它。
+    curTRef.current = curT;
+    setCurT(curT);
+  };
+
+  const toggleLoop = () => {
+    if (loopCardId) {
+      if (playing) {
+        if (curTRef.current < curT) seek(curT, true);
+        else keepDisplayedPosition();
+      }
+      setLoopCardId(null);
+      return;
+    }
+    if (!selCard || !selectedFrames) return;
+    finishEdit(true);
+    setLoopCardId(selCard.id);
+    setTab("edit");
+    seek(frameTime(selectedFrames.first, exportSize.rate), true);
+    setPlaying(true);
+  };
+
+  const pauseAtCurrentPosition = () => {
+    if (playing) keepDisplayedPosition();
+    setPlaying(false);
+  };
+
+  const changeTab = (next: StudioTab) => {
+    if (next === tab) return;
+    finishEdit(true);
+    pauseAtCurrentPosition();
+    setTab(next);
+  };
+
+  const selectCard = (id: string | null) => {
+    if (id !== selCardIdRef.current) {
+      finishEdit(true);
+      setMoveGroup(false);
+      setLayoutScale(id ? layoutRef.current.get(id)?.scale : undefined);
+    }
+    setTab("edit");
+    pauseAtCurrentPosition();
+    setSelCardId(id);
+  };
+
+  const locateCard = (card: OverlayCard) => {
+    const frames = visibleFrameRange(card, exportSize.rate, exportSize.frames);
+    selectCard(card.id);
+    if (frames) seek(frameTime(frames.first, exportSize.rate));
+  };
+
+  const stepFrame = (delta: -1 | 1) => {
+    const current = Math.min(exportSize.frames - 1, frameAtOrBefore(curTRef.current, exportSize.rate));
+    const target = Math.max(0, Math.min(exportSize.frames - 1, current + delta));
+    setPlaying(false);
+    setTab("edit");
+    seek(frameTime(target, exportSize.rate));
+  };
 
   const openExport = () => {
     if (exporting || trialAspect) return;
@@ -1106,22 +1380,24 @@ export default function App() {
   };
 
   const handleVideo = async (file: File | null, replacePrevious = true) => {
-    if (videoBusy) return;
+    if (videoBusy && replacePrevious) return;
     if (file && file === uploadedVideo.current) return;
     setVideoScale(1);
     uploadedVideo.current = null;
+    setVideoDur(0);
     camClearedRef.current = false; // 换了视频,之前那次「清除」不作数
     // 记住换之前的主视频:下面落盘成功后,如果全局「口播视频」(overlay.cam)就是它,要跟着换。
     // 以前不换 —— 自动挂载只在 cam 为空时生效,换视频后 cam 还指着上一条:预览里运镜卡
     // 圆窗放的是新视频(预览用 videoUrl),导出烤进去的却是旧的(导出用 doc.cam),而且没有任何提示。
     // 只在「cam 等于旧主视频」时换:用户在侧栏手动选过别的口播视频,那是他的选择,不动。
+    const request = ++mediaRequest.current;
+    setRestoredVideoUrl(undefined);
     const prevUrl = videoUrl;
     setVideoUrl((prev) => {
       if (prev?.startsWith("blob:")) URL.revokeObjectURL(prev);
       return null;
     });
     if (!file) {
-      setVideoDur(0);
       setPlaying(false);
       return;
     }
@@ -1138,6 +1414,7 @@ export default function App() {
       // 非 2xx 也要把响应体读出来:后台写盘失败时会认真回一句原因(500 + JSON),
       // 以前 `r.ok ? … : null` 直接把它扔了,页面一声不吭退回 blob,用户以为导入成功了
       const d = await r.json().catch(() => null);
+      if (request !== mediaRequest.current) return;
       if (d?.ok && d.url) {
         uploadedVideo.current = file;
         setVideoUrl(d.url);
@@ -1149,14 +1426,15 @@ export default function App() {
           "先用临时地址预览;这种情况下刷新要重新导入,导出时也带不上口播。",
       );
     } catch (e) {
+      if (request !== mediaRequest.current) return;
       // 本地服务没在跑的时候会走到这儿。以前这里一声不吭地退回 blob,用户不知道后台已经
       // 掉线,只会觉得「刷新一次素材就没了」。和其他三个上传入口一样弹一句人话;
       // 顶部横幅交给心跳去判(它要连续两次探不到才报,这里一次失败就翻旗会闪一下又消失)。
       alert(`❌ 视频落盘失败:${uploadErrText(e)}`);
     } finally {
-      setVideoBusy(false);
+      if (request === mediaRequest.current) setVideoBusy(false);
     }
-    setVideoUrl(URL.createObjectURL(file));
+    if (request === mediaRequest.current) setVideoUrl(URL.createObjectURL(file));
   };
 
   // 效果库当前效果。selectedId 一直来自 EFFECTS,理论上找得到,
@@ -1190,33 +1468,51 @@ export default function App() {
   };
 
   const startManual = (context: ProductionContext | null, aspect: Aspect, video: File | null, lines: SrtLine[] | null) => {
-    if (overlay?.cards.length && !confirm("开始手动编排会替换当前编排，继续吗？")) return;
+    if (hasCurrentDraft && !confirm("开始手动编排会替换当前编排，继续吗？")) return;
+    if (!video && !lines?.length && !draft.flush()) {
+      enterEditor();
+      return;
+    }
     resetSource();
     setEntryProduction(context);
     setApplied(null);
-    openDocument({ version: 1, aspect, cards: [] });
+    openDocument({ version: 1, aspect, cards: [] }, undefined, undefined, newDraftProject(context), true);
     setSrt(lines);
-    if (video) void handleVideo(video);
+    if (video) void handleVideo(video, false);
   };
 
-  const applyCandidate = (context: ProductionContext | null, doc: OverlayDoc, lines: SrtLine[] | null, identity: string, video: File | null) => {
-    if (overlay?.cards.length && !confirm("用这份候选替换当前编排？当前手调内容会被替换。")) return false;
+  const applyCandidate = (context: ProductionContext | null, doc: OverlayDoc, lines: SrtLine[] | null, identity: string, video: File | null, warnings?: string[]) => {
+    if (hasCurrentDraft && !confirm("用这份候选替换当前编排？当前手调内容会被替换。")) return false;
     if (sourceChanged(production, context)) resetSource();
     setEntryProduction(context);
-    openDocument(doc);
+    openDocument(doc, undefined, warnings, newDraftProject(context));
     setSrt(lines);
     setApplied(identity);
-    if (video) void handleVideo(video);
+    if (video) void handleVideo(video, false);
     return true;
   };
 
   const startOver = async () => {
-    if (overlay?.cards.length && overlay !== committedDraft) {
+    finishEdit(true);
+    let discard = false;
+    const hasUndeliveredSubtitles = overlay?.cards.length === 0 && !!srt?.length && srt !== deliveredSubtitles.current;
+    if (!example && hasCurrentDraft && (overlay !== committedDraft || hasUndeliveredSubtitles)) {
       if (confirm("本次有未导出的手调稿。先导出编排 JSON？")) {
         if (!await handleExportJson()) return;
         if (production) return; // 保留导出路径提示，再点一次即可重新开始。
-      } else if (!confirm("确认放弃尚未导出的手调稿并重新开始？")) return;
+      } else {
+        if (!confirm("确认放弃尚未导出的手调稿并重新开始？")) return;
+        discard = true;
+      }
     }
+    if (discard && draftProject && !draft.discard(draftProject.id)) {
+      alert("无法清除本机草稿，请重试。");
+      return;
+    }
+    if (!discard && !draft.flush()) return;
+    invalidateDocument();
+    setDraftProject(null);
+    setLoopCardId(null);
     resetSource();
     setOverlay(null);
     setSelCardId(null);
@@ -1228,6 +1524,8 @@ export default function App() {
     setExample(false);
     setLintIssues([]);
     setCommittedDraft(null);
+    deliveredSubtitles.current = null;
+    manualStarter.current = null;
     undoRef.current = [];
     redoRef.current = [];
     originRef.current = null;
@@ -1242,13 +1540,27 @@ export default function App() {
     // 这里以前的 ! 是「整页白屏」的根因:编排里只要有一张不认识的卡,
     // 查出来就是 undefined。现在照实传下去,由 ParamsPanel 说清楚是哪张。
     inEdit && selCard ? EFFECTS.find((e) => e.id === selCard.kind) : effect;
-  const panelParams = inEdit && selCard ? selCard.params : params;
+  const shownAspect = trialAspect ?? aspectOfDoc(overlay);
+  const selectedPlacement = overlay && selCard ? frameOf(overlay, selCard, shownAspect)?.current : undefined;
+  const panelParams = inEdit && selCard ? { ...selCard.params, ...(selectedPlacement?.mode === "auto" && selectedPlacement.placement) } : params;
+  const selectedGroup = selCard ? cardGroup(selCard, selectedPlacement) : undefined;
+  const dragWholeGroup = moveGroup && !!selectedGroup;
+  const sliderStart = useRef<CardLayout | undefined>(undefined);
+  const beginSlider = () => {
+    if (!selCard) return;
+    sliderStart.current = getLayout(selCard.id);
+    beginEdit(`scale:${selCard.id}`);
+  };
+  const finishSlider = (commit: boolean) => {
+    sliderStart.current = undefined;
+    finishEdit(commit);
+  };
   const panelOnChange = inEdit && selCard ? handleCardParamChange : handleParamChange;
 
   return (
     <>
     <div hidden={screen !== "prepare"}>
-      <Preparation key={preparationKey} desktopHost={exportHost} hasEditor={started} canRestore={canRestore} applied={applied}
+      <Preparation key={preparationKey} desktopHost={exportHost} hasEditor={started} savedDraft={draft.saved} applied={applied}
         onResume={enterEditor} onManual={startManual} onApply={applyCandidate} onImport={handleImportJson}
         onDemo={handleLoadDemo} onRestore={restoreDraft} />
     </div>
@@ -1280,6 +1592,19 @@ export default function App() {
           回到启动时那个终端窗口,重新运行 <code>npm run dev</code>(或再双击一次启动器),然后刷新本页。
         </div>
       )}
+      {((draftProject && draft.status) || jsonDelivery) && (
+        <div className="editor-save-feedback">
+          {draftProject && draft.status && (
+            <div role={draft.status === "failed" || draft.status === "conflict" ? "alert" : "status"} data-draft-status={draft.status}>
+              {draft.status === "saving" ? "正在保存本机草稿…" : draft.status === "failed" ? "本机草稿保存失败"
+                : draft.status === "conflict" ? "其他窗口已更改本机草稿。可导出当前编排 JSON，或返回准备页恢复最新草稿。"
+                : draft.saved?.savedAt ? `本机草稿已保存 · ${draftTime(draft.saved.savedAt)}` : "本机草稿已保存"}
+              {draft.status === "failed" && <button onClick={draft.flush}>重试保存草稿</button>}
+            </div>
+          )}
+          {jsonDelivery && <div role={jsonDelivery.error ? "alert" : "status"} data-json-delivery>{jsonDelivery.text}</div>}
+        </div>
+      )}
       <TopBar
         productionName={subtitleOutput ? production?.subtitle?.name : production?.directory.name}
         aspect={trialAspect ?? (overlay ? aspectOfDoc(overlay) : "9:16")}
@@ -1287,12 +1612,16 @@ export default function App() {
         onAspect={handleAspect}
         onConfirmAspect={confirmAspect}
         onCancelAspect={() => setTrialAspect(null)}
-        onPreparation={() => { setPlaying(false); setScreen("prepare"); }}
+        onPreparation={() => { finishEdit(true); setPlaying(false); setScreen("prepare"); }}
+        onUndo={undo}
+        onRedo={redo}
+        canUndo={undoRef.current.length > 0}
+        canRedo={redoRef.current.length > 0}
         onStartOver={startOver}
         onExportJson={handleExportJson}
         saving={saving}
         tab={tab}
-        onTab={setTab}
+        onTab={changeTab}
         curT={curT}
         duration={duration}
         playing={playing}
@@ -1382,7 +1711,7 @@ export default function App() {
       <div className="app-body">
       <Sidebar
         tab={tab}
-        onTab={setTab}
+        onTab={changeTab}
         effects={EFFECTS}
         selectedId={selectedId}
         onSelect={handleSelect}
@@ -1406,11 +1735,7 @@ export default function App() {
         curT={curT}
         onSeek={seek}
         onImportSrt={handleImportSrt}
-        onSelectCard={(id) => {
-          setSelCardId(id);
-          const c = overlay?.cards.find((x) => x.id === id);
-          if (c) seek(c.start + 0.01);
-        }}
+        onSelectCard={selectCard}
         onImportJson={handleImportJson}
         onExportJson={handleExportJson}
         onClearOverlay={handleClearOverlay}
@@ -1431,9 +1756,18 @@ export default function App() {
           videoUrl={videoUrl}
           fxScale={fxScale}
           overlayCards={inEdit ? activeCards : null}
-          now={curT}
+          overlayDoc={overlay}
+          onLayout={receiveLayout}
+          onBeginEdit={beginEdit}
+          onFinishEdit={finishEdit}
+          onPlaceCard={setCardPlacement}
+          onWheelCard={wheelCard}
+          moveGroup={dragWholeGroup}
+          now={sampleTime}
           playing={playing}
+          seekVersion={seekVersion}
           overlayTheme={overlay?.theme}
+          overlayCam={overlay?.cam}
           glow={overlay?.glow ?? false}
           breath={overlay?.breath ?? false}
           font={overlay?.font}
@@ -1450,7 +1784,7 @@ export default function App() {
             }
           }}
           onNudge={handleNudge}
-          onPickCard={setSelCardId}
+          onPickCard={selectCard}
           selectedCardId={selCardId}
         />
       </main>
@@ -1461,13 +1795,25 @@ export default function App() {
         onChange={panelOnChange}
         card={inEdit ? selCard : null}
         editMode={inEdit}
+        cardTime={sampleTime}
+        canLocateCard={!!selectedFrames}
+        onLocateCard={locateCard}
         onLayer={handleCardLayer}
         layer={layerInfo}
         onTimeChange={handleCardTimeChange}
         onKindChange={handleCardKindChange}
         onDelete={handleDeleteCard}
-        onResetPlacement={inEdit && selCard?.kind === "chapter-bar" ? () =>
-          handleNudge(selCard.id, { manualX: 0, manualY: 0, offsetX: 0, offsetY: 0 }) : undefined}
+        onResetPlacement={inEdit && selCard ? () => resetCardPlacement(selCard.id) : undefined}
+        onDetach={inEdit && selCard && selectedGroup && layoutScale !== undefined ? () => detachCard(selCard.id) : undefined}
+        groupName={inEdit ? selectedGroup : undefined}
+        moveGroup={dragWholeGroup}
+        onToggleMoveGroup={() => setMoveGroup((value) => !value)}
+        editScale={inEdit && selCard ? layoutScale : undefined}
+        onBeginScale={beginSlider}
+        onFinishScale={finishSlider}
+        onEditScale={inEdit && selCard ? (value) => scaleCard(selCard.id, value, sliderStart.current) : undefined}
+        onBeginEdit={beginEdit}
+        onFinishEdit={finishEdit}
         onAddToTimeline={handleAddToTimeline}
         globalBreath={overlay?.breath === true}
         addAt={curT}
@@ -1478,18 +1824,22 @@ export default function App() {
         <TimelineBar
           duration={duration}
           t={curT}
+          sampleTime={sampleTime}
           cards={overlay?.cards ?? []}
           selectedId={selCardId}
           shown={activeCards.length}
           onSeek={seek}
-          onSelect={(id) => {
-            setTab("edit");
-            setPlaying(false);
-            setSelCardId(id);
-            const card = overlay?.cards.find((item) => item.id === id);
-            if (card && (curT < card.start || curT >= card.end)) seek(card.start + Math.min(0.01, (card.end - card.start) / 2));
-          }}
+          onSelect={selectCard}
+          frameIndex={sampleFrame}
+          lastFrame={duration > 0 ? exportSize.frames - 1 : 0}
+          fpsLabel={preset.fps === "30000/1001" ? "29.97" : String(preset.fps)}
+          onStepFrame={stepFrame}
+          loopTarget={loopCard}
+          loopUnavailable={selectedFrames ? undefined : selCard ? "该卡时段没有可播放的成品帧" : "请先选择一张卡片"}
+          onToggleLoop={toggleLoop}
           onTimes={handleCardTimes}
+          onBeginEdit={beginEdit}
+          onFinishEdit={finishEdit}
         />
 
       {delivery && <div className="production-delivery" role={delivery.error || delivery.brollError ? "alert" : "status"}>

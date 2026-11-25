@@ -19,6 +19,7 @@
     "sync:agent-skills": "node scripts/sync-agent-skills.mjs",
     "check:agent-skills": "node scripts/sync-agent-skills.mjs --check",
     "verify:002": "node scripts/verify-002.mjs",
+    "verify:003": "node scripts/verify-003.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

@@ -1,3 +1,4 @@
+import { formatNumericText, parseNumericText, splitRankRow, type NumericText } from "../../overlay/numeric-text";
 import type { CSSProperties } from "react";
 import type { EffectDef, EffectProps } from "../types";
 import { stageGeom } from "../../stage";
@@ -135,9 +136,7 @@ function rbPalette(accent: string) {
   return { deep: rbMix(base, [0, 0, 0], 0.08), light: rbMix(base, [255, 255, 255], 0.3), num: rbMix(base, [255, 255, 255], 0.42), glow: base, ink: rbMix(base, [0, 0, 0], 0.85) };
 }
 
-type RbRow = { name: string; value: number; dec: number; text: string };
-/** 数值显示:保留原写法的小数位,千分位加逗号 */
-const rbFmt = (v: number, dec: number) => v.toLocaleString("en-US", { minimumFractionDigits: dec, maximumFractionDigits: dec });
+type RbRow = { name: string; value: number; dec: number; text: string; sign: NumericText["sign"] };
 
 function rbLayout(rows: RbRow[], title: string, suffix: string, lead: number, W: number, z: number) {
   const textW = W - RB_PL - RB_PR;
@@ -184,16 +183,13 @@ function RankBars({ params, playToken }: EffectProps<RankBarsParams>) {
   const list: RbRow[] = String(rows ?? "")
     .split("|")
     .map((r) => {
-      const at = Math.max(r.lastIndexOf(","), r.lastIndexOf("，"));
-      const name = (at < 0 ? r : r.slice(0, at)).trim();
-      const raw = at < 0 ? "" : r.slice(at + 1).trim();
-      const num = Number(raw);
-      const value = Number.isFinite(num) ? num : 0;
-      const dec = Number.isFinite(num) && raw.includes(".") ? raw.length - raw.indexOf(".") - 1 : 0;
-      return { name, value, dec, text: rbFmt(value, dec) };
+      const { name, raw } = splitRankRow(r);
+      const numeric = parseNumericText(raw) ?? parseNumericText(Number(raw)) ?? parseNumericText(0)!;
+      const { value, decimals: dec, sign } = numeric;
+      return { name, value, dec, sign, text: numeric.text };
     })
     .filter((r) => r.name || r.value);
-  if (!list.length) list.push({ name: "", value: 0, dec: 0, text: "0" });
+  if (!list.length) list.push({ name: "", value: 0, dec: 0, text: "0", sign: "" });
   const n = list.length;
   const maxV = Math.max(...list.map((r) => r.value));
   const lead = list.findIndex((r) => r.value === maxV);
@@ -388,7 +384,7 @@ function RankBars({ params, playToken }: EffectProps<RankBarsParams>) {
                           transformOrigin: "100% 80%", transform: pulse > 0 ? `scale(${rf4(1 + 0.08 * pulse)})` : undefined,
                         }}
                       >
-                        <b style={{ fontWeight: 700 }}>{rbFmt(r.value * cp, r.dec)}</b>
+                        <b style={{ fontWeight: 700 }}>{cp >= 1 ? r.text : formatNumericText(r.value * cp, r.dec, r.sign)}</b>
                         {unit && <small style={{ fontSize: "0.55em", fontWeight: 600, marginLeft: 2, opacity: 0.7 }}>{unit}</small>}
                       </div>
                     </div>

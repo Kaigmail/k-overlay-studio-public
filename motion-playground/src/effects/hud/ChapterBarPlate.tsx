@@ -122,7 +122,7 @@ export function ChapterBarPlate({ params, playToken }: EffectProps<ChapterBarPar
 
   // ---------- 进场:从顶部滑入 ----------
   // 选中且暂停时显示完整章节条，方便在动画还没进场的时间点拖动。
-  const e = params.__editingPlacement ? 1 : easeOutCubic(prog(te, 0, ENTER));
+  const e = easeOutCubic(prog(te, 0, ENTER));
 
   let cur = 0;
   for (let i = 0; i < n; i++) if (T >= items[i].start) cur = i;

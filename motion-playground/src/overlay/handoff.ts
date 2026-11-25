@@ -56,14 +56,15 @@ function readCards(raw: ReturnType<typeof parseJson>) {
         if (!Object.hasOwn(card.params, key)) continue;
         const value: unknown = card.params[key];
         const valid = type === "range" ? typeof value === "number" && Number.isFinite(value)
-          : type === "toggle" ? typeof value === "boolean" : typeof value === "string";
+          : type === "toggle" ? typeof value === "boolean"
+          : typeof value === "string" || (type === "text" && typeof effect.defaults[key] === "number" && Number.isFinite(value));
         if (!valid) throw new Error(`第 ${i + 1} 张「${card.kind}」卡片的参数 ${key} 类型不符。`);
       }
     }
   }
   const result = parseOverlay(raw);
   if (result.error || !result.doc) throw new Error(result.error || "无法读取编排");
-  return result.doc;
+  return { doc: result.doc, warnings: result.warnings };
 }
 
 function readMissing(missing: unknown): string[] {
@@ -84,7 +85,8 @@ function validateHandoff(raw: ReturnType<typeof parseJson>, subtitle: NonNullabl
   if (typeof raw.handoff.srtSha256 !== "string" || raw.handoff.srtSha256.toLowerCase() !== subtitle.sha256) {
     throw new Error("交稿的字幕内容已过时，请重新生成。");
   }
-  return { doc: { ...readCards(raw), aspect }, missing: readMissing(raw.handoff.missing) };
+  const { doc, warnings } = readCards(raw);
+  return { doc: { ...doc, aspect }, warnings, missing: readMissing(raw.handoff.missing) };
 }
 
 export function parseHandoff(text: string, subtitle: NonNullable<ProductionContext["subtitle"]>, aspect: Aspect) {
@@ -99,9 +101,10 @@ export function parsePickedOverlay(text: string, subtitle: ProductionContext["su
       ? legacySubtitle : subtitle;
     return { ...validateHandoff(raw, selected, aspect), verified: true };
   }
-  const doc = readCards(raw);
+  const { doc, warnings } = readCards(raw);
   return {
     doc: { ...doc, aspect: doc.aspect ?? "16:9" } as const,
+    warnings,
     missing: raw?.handoff?.missing === undefined ? [] : readMissing(raw.handoff.missing),
     verified: false,
   };

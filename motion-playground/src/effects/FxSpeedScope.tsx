@@ -1,18 +1,38 @@
-import { useRef, type ReactNode } from "react";
-import { FxSpeedContext, useFxSpeed } from "./useAnimation";
+import { createContext, useLayoutEffect, useRef, type ReactNode } from "react";
+import { FxSpeedContext } from "./useAnimation";
 
-/**
- * 单张卡的动画速度作用域:
- * - rAF 钩子(数字滚动/打字机等)通过 FxSpeedContext 读倍速
- * - CSS 过渡通过 playbackRate 每帧对齐
- * display:contents 不产生盒子,不影响卡片定位。
- */
-export function FxSpeedScope({ speed, children }: { speed: number; children: ReactNode }) {
+export const FxTimelineContext = createContext<{ time: number; playing: boolean; seekVersion: number } | null>(null);
+
+/** 时间轴上的 CSS 关键帧由节目帧定位，效果库仍交给浏览器播放。 */
+export function FxSpeedScope({ speed, time, start = 0, playing = false, seekVersion = 0, children }: {
+  speed: number;
+  time?: number;
+  start?: number;
+  playing?: boolean;
+  seekVersion?: number;
+  children: ReactNode;
+}) {
   const ref = useRef<HTMLDivElement>(null);
-  useFxSpeed(() => ref.current, speed);
+  const rate = Number.isFinite(speed) && speed > 0 ? speed : 1;
+
+  useLayoutEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+    for (const animation of element.getAnimations({ subtree: true })) {
+      if (time === undefined) {
+        animation.playbackRate = rate;
+      } else if (animation instanceof CSSAnimation) {
+        animation.pause();
+        animation.currentTime = Math.max(0, time - start) * rate * 1000;
+      }
+    }
+  });
+
   return (
     <div ref={ref} style={{ display: "contents" }}>
-      <FxSpeedContext.Provider value={speed}>{children}</FxSpeedContext.Provider>
+      <FxTimelineContext.Provider value={time === undefined ? null : { time, playing, seekVersion }}>
+        <FxSpeedContext.Provider value={rate}>{children}</FxSpeedContext.Provider>
+      </FxTimelineContext.Provider>
     </div>
   );
 }

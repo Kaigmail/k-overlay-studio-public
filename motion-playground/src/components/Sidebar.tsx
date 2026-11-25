@@ -12,7 +12,6 @@ const LIB_GROUPS = [
   { title: OPUS_TITLE, effects: OPUS_IDS.map((id) => EFFECTS.find((e) => e.id === id)!).filter(Boolean) },
   ...EFFECT_GROUPS,
 ];
-import { PROMO_URL } from "../promo";
 import { kindColor } from "../effects/kindColor";
 import type { OverlayDoc } from "../overlay/types";
 import type { SrtLine } from "../overlay/srt";
@@ -168,7 +167,7 @@ export function Sidebar({
   const allCollapsed = fxGroups.every((g) => collapsedGroups.includes(g.title));
   const fxListRef = useRef<HTMLDivElement>(null);
   // ↑ ↓ = 上一张 / 下一张卡,两个模式都能用:
-  // 效果库走过滤后的卡片库,编辑台走时间轴上的卡(和点一下一样,播放头跟着跳过去)。
+  // 效果库走过滤后的卡片库,编辑台走时间轴上的卡，选卡时保留播放头。
   // 编辑台的「字幕稿」视图不接管方向键 —— 那儿没有"卡"这个东西。
   useEffect(() => {
     const inLib = tab === "library";
@@ -254,6 +253,7 @@ export function Sidebar({
                     <button
                       key={c.id}
                       className={`fx-item fx-item--row ${c.id === selCardId ? "is-on" : ""}`}
+                      data-card-id={c.id}
                       onClick={() => onSelectCard(c.id)}
                     >
                       <span className="fx-idx">{String(i + 1).padStart(2, "0")}</span>
@@ -443,17 +443,6 @@ export function Sidebar({
                 </div>
               ));
             })()}
-            {/* 列表末尾的入口:人正在翻卡、正在找"有没有更合适的表达"的时候才遇到。
-                搜索状态下不出现 —— 那时他要的是某一张具体的卡,不是版本对比。
-                地址为空时整块不渲染。 */}
-            {PROMO_URL && !fxQuery ? (
-              <a className="fx-promo" href={PROMO_URL} target="_blank" rel="noreferrer">
-                <span className="fx-promo-t">没找到想要的表达?</span>
-                <span className="fx-promo-d">
-                  这一份是基础版。专业版有更多动效卡、更懂内容的 AI 编排,也可以直接找作者聊 —— 去官网看 ↗
-                </span>
-              </a>
-            ) : null}
           </div>
         </>
       )}

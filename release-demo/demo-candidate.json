@@ -6,15 +6,17 @@
       "id": "demo-chapter",
       "kind": "chapter-bar",
       "start": 0,
-      "end": 3.2,
+      "end": 7,
       "params": {
-        "chapters": "字幕编排 0 | 画布微调 1.6"
+        "chapters": "字幕编排 0 | 画布微调 3",
+        "theme": "dark",
+        "accent": "blue"
       }
     }
   ],
   "handoff": {
     "srt": "demo.srt",
-    "srtSha256": "ed99565dad6df4bff283474611742672f7c2be9deeedbf63a9996ec01edce66d",
+    "srtSha256": "31a956a06362f11f7241aff3db3faf0404db1b6c529fdeb847fb07de6075bca1",
     "missing": []
   }
 }

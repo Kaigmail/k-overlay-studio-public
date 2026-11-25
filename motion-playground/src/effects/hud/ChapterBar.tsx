@@ -26,7 +26,6 @@ export interface ChapterBarParams {
   /** 编辑台/导出注入:本卡结束秒(最后一章的进度终点) */
   __end?: number;
   __start?: number;
-  __editingPlacement?: boolean;
 }
 
 /**

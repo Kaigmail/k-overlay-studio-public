@@ -1,8 +1,5 @@
 import type { ComponentType } from "react";
 
-/** 动效在画布里的落位:左侧 / 右侧 */
-export type Side = "left" | "right";
-
 /** 参数控件类型 */
 export type Control =
   | {
