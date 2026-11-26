@@ -37,7 +37,7 @@ npm run sync:cards   # 改了卡表或默认文案后同步 skill 四入口
 
 环境:Node ≥ 22.12(仓库根有 .nvmrc)、ffmpeg(导出用)。项目路径须纯英文无空格。
 
-Windows 从 `motion-playground/start-k-overlay-studio.bat` 启动、`stop-k-overlay-studio.bat` 停止。macOS 从 `motion-playground/start-k-overlay-studio.command` 启动，终端按 Ctrl+C 停止。旧脚本转到新入口。上游署名、许可原文、本机存储键和 `Projects/overlay-studio` 交稿路径保留原值。
+Windows 从 `motion-playground/start-k-overlay-studio.bat` 启动、`stop-k-overlay-studio.bat` 停止。macOS 从 `motion-playground/start-k-overlay-studio.command` 启动，终端按 Ctrl+C 停止。旧脚本转到新入口。上游署名、本机存储键和 `Projects/overlay-studio` 交稿路径保留原值。
 
 ## 架构地图(改之前先看这里)
 

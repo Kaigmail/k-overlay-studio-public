@@ -277,7 +277,6 @@ export function Preparation(props: Props) {
             恢复上次草稿 · {props.savedDraft.project.name}
             {props.savedDraft.savedAt ? ` · ${draftTime(props.savedDraft.savedAt)}` : ""}
           </button>}
-          <a href="/LICENSE.txt" target="_blank" rel="noreferrer" title="K-Overlay-Studio · 原作者一页枝鸥 · 完整授权">关于</a>
           <input ref={importFile} hidden type="file" accept=".json,application/json" onChange={(event) => {
             const file = event.target.files?.[0];
             event.target.value = "";

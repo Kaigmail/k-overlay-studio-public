@@ -194,7 +194,7 @@ sealed class DesktopWindow : Form
                 if (!TrustedPage(e.Uri)) e.Cancel = true;
                 else restored = false;
             };
-            browser.NewWindowRequested += OpenReference;
+            browser.NewWindowRequested += (s, e) => e.Handled = true;
             browser.WebMessageReceived += ReceiveMessage;
             browser.NavigationCompleted += (s, e) => {
                 if (!e.IsSuccess) { ShowProblem("无法打开本地编辑台，请重新启动应用。"); return; }
@@ -286,18 +286,6 @@ sealed class DesktopWindow : Form
         return Uri.TryCreate(value, UriKind.Absolute, out uri) && uri.Scheme == "http"
             && uri.Host == "localhost" && uri.Port == 5177 && uri.AbsolutePath == "/"
             && uri.Query.Length == 0 && uri.UserInfo.Length == 0;
-    }
-
-    void OpenReference(object sender, CoreWebView2NewWindowRequestedEventArgs args)
-    {
-        args.Handled = true;
-        if (!args.IsUserInitiated || !TrustedPage(view.CoreWebView2.Source)) return;
-        if (args.Uri != Home + "LICENSE.txt") return;
-        try { Process.Start(new ProcessStartInfo(args.Uri) { UseShellExecute = true }); }
-        catch (System.ComponentModel.Win32Exception error)
-        {
-            MessageBox.Show(this, "无法打开链接。\r\n" + error.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
-        }
     }
 
     static string Field(Dictionary<string, object> message, string key)
