@@ -1,6 +1,6 @@
 # K-Overlay-Studio 发布与署名
 
-K-Overlay-Studio 是 Kai 的产品，基于一页枝鸥（Jessie Zhou）的 [Overlay Studio](https://github.com/jeszhou/overlay-studio) 获授权二次开发。上游代码和素材继续保留原作者的署名及 [中文许可原文](LICENSE) 和 [英文许可原文](LICENSE-EN)。
+K-Overlay-Studio 是 Kai 的产品，基于一页枝鸥（Jessie Zhou）的 [Overlay Studio](https://github.com/jeszhou/overlay-studio) 获授权二次开发。上游代码和素材继续保留原作者的署名及 [中文许可原文](legal/LICENSE) 和 [英文许可原文](legal/LICENSE-EN)。
 
 原作者授权 Kai 修改和二次开发、公开二次开发后的源码，并通过 GitHub Releases 免费分发 Windows 构建。K-Overlay-Studio 发布版限非商业用途。公开源码和免费下载均按该授权范围提供。
 
