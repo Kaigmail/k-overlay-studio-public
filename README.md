@@ -47,4 +47,6 @@ npm run dev
 
 ## 署名与使用范围
 
-K-Overlay-Studio 由 Kai 开发和维护，基于一页枝鸥（Jessie Zhou）的 [Overlay Studio](https://github.com/jeszhou/overlay-studio) 获授权二次开发。这个发布版限非商业用途，Windows 构建可通过 GitHub Releases 免费下载。原作者署名和原始许可随仓库保留。详见[发布与署名](DISTRIBUTION.md)。
+K-Overlay-Studio 由 Kai 开发和维护，基于一页枝鸥（Jessie Zhou）的 [Overlay Studio](https://github.com/jeszhou/overlay-studio) 源码公开版二次开发。仓库保留原作者署名和原始许可。
+
+本发布版仅供学习和个人非商业使用。Windows 版可在 [GitHub Releases](https://github.com/Kaigmail/k-overlay-studio-public/releases) 免费下载。
